@@ -65,12 +65,27 @@ if [ -n "${missing}" ]; then
   sudo apt-get install -y -qq ${missing}
 fi
 
-# ---- 2. decrypt the token (age reads the passphrase from your terminal) ------
-log "decrypting the deploy token."
-printf '\033[36m[bootstrap]\033[0m \033[33mpassphrase hint:\033[0m %s\n' "${PASSPHRASE_HINT}"
-log "enter the passphrase when prompted:"
-TOKEN="$(printf '%s' "${REPO_TOKEN_AGE}" | age -d)" || die "decryption failed (wrong passphrase?)."
-[ -n "${TOKEN}" ] || die "empty token after decryption."
+# ---- 2. obtain the clone token ----------------------------------------------
+# Already-provisioned devices hold their own age identity with the token sealed
+# inside (J5): read it and skip the passphrase entirely — this is what makes
+# unattended/cron updates possible. Only a first provision (or a device whose
+# identity is gone) falls back to the embedded blob + the operator passphrase.
+DEVICE_KEY="/etc/scanbox/device-key.txt"
+DEVICE_ENV="${DEPLOY_DIR}/.env.age"
+TOKEN=""
+if sudo test -r "${DEVICE_KEY}" 2>/dev/null && [ -f "${DEVICE_ENV}" ]; then
+  log "device identity found — reading the sealed token (no passphrase needed)."
+  TOKEN="$(sudo age -d -i "${DEVICE_KEY}" "${DEVICE_ENV}" 2>/dev/null \
+           | sed -n 's/^SCANBOX_REPO_TOKEN=//p' | head -1)" || true
+  [ -n "${TOKEN}" ] || log "no sealed token in this device's secrets — falling back to the passphrase."
+fi
+if [ -z "${TOKEN}" ]; then
+  log "decrypting the deploy token."
+  printf '\033[36m[bootstrap]\033[0m \033[33mpassphrase hint:\033[0m %s\n' "${PASSPHRASE_HINT}"
+  log "enter the passphrase when prompted:"
+  TOKEN="$(printf '%s' "${REPO_TOKEN_AGE}" | age -d)" || die "decryption failed (wrong passphrase?)."
+  [ -n "${TOKEN}" ] || die "empty token after decryption."
+fi
 
 # ---- 3. clone/update the private repo WITHOUT the token touching ps/URL ------
 # The token goes into a private tmpfs file; a GIT_ASKPASS shim feeds it to git,
@@ -119,7 +134,14 @@ else
   git clone --quiet --branch "${CLONE_BRANCH}" "${URL}" "${DEPLOY_DIR}"
 fi
 unset GIT_ASKPASS
-cleanup; trap - EXIT
+# Keep the token file alive across the handoff ONLY so deploy.sh can seal it
+# into this device's .env.age (first provision) — after that the device reads
+# it from its own identity and no passphrase is ever needed again. Same
+# hygiene as the askpass shim: the *path* travels in the environment, the
+# secret stays in a 0600 tmpfs file, and deploy.sh's own trap wipes it.
+rm -f "${ASKPASS}" 2>/dev/null || true
+trap - EXIT
+export SCANBOX_TOKEN_FILE="${TOKEN_FILE}"
 
 # ---- 4. hand off to the real deploy -----------------------------------------
 if [ -n "${SCANBOX_BOOTSTRAP_CLONE_ONLY:-}" ]; then
