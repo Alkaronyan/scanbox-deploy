@@ -14,7 +14,7 @@
 # provisioning). The passphrase is the ONLY secret you provide; the token at
 # rest is age-encrypted.
 #
-# The token blob below is produced by secrets/encrypt_repo_token.sh — run that,
+# The token blob below is produced by scripts/deploy/encrypt_repo_token.sh — run that,
 # then paste its output between the AGE markers. Nothing else needs editing.
 # =============================================================================
 set -euo pipefail
@@ -27,7 +27,7 @@ BRANCH="${SCANBOX_REPO_BRANCH:-uvc-webcam-beta}"
 DEPLOY_DIR="${SCANBOX_DEPLOY_DIR:-${HOME}/scanbox}"
 
 # ---- encrypted read-only repo token (age -p, armored) -----------------------
-# Replace the placeholder with the output of secrets/encrypt_repo_token.sh.
+# Replace the placeholder with the output of scripts/deploy/encrypt_repo_token.sh.
 REPO_TOKEN_AGE=$(cat <<'AGE'
 -----BEGIN AGE ENCRYPTED FILE-----
 YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBtMTJaYXVZWlA5OUl1VThI
@@ -51,7 +51,7 @@ log() { printf '\033[36m[bootstrap]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[bootstrap] %s\033[0m\n' "$*" >&2; exit 1; }
 
 case "${REPO_TOKEN_AGE}" in
-  *PASTE*) die "bootstrap.sh still has the placeholder token — run secrets/encrypt_repo_token.sh and paste its output between the AGE markers." ;;
+  *PASTE*) die "bootstrap.sh still has the placeholder token — run scripts/deploy/encrypt_repo_token.sh and paste its output between the AGE markers." ;;
 esac
 
 # ---- 1. minimal deps to decrypt + clone (deploy.sh installs the rest) --------
@@ -128,8 +128,8 @@ if [ -n "${SCANBOX_BOOTSTRAP_CLONE_ONLY:-}" ]; then
   exit 0
 fi
 log "clone OK — handing off to deploy.sh"
-[ -f "${DEPLOY_DIR}/deploy.sh" ] || die "no deploy.sh in the repo at ${DEPLOY_DIR}."
+[ -f "${DEPLOY_DIR}/scripts/deploy/deploy.sh" ] || die "no deploy.sh in the repo at ${DEPLOY_DIR}."
 # Pass the resolved branch through so deploy.sh operates on the same branch we
 # just cloned (its own default is main).
 export SCANBOX_REPO_BRANCH="${CLONE_BRANCH}"
-exec bash "${DEPLOY_DIR}/deploy.sh" "$@"
+exec bash "${DEPLOY_DIR}/scripts/deploy/deploy.sh" "$@"
