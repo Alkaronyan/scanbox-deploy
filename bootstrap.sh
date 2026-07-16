@@ -132,4 +132,9 @@ log "clone OK — handing off to deploy.sh"
 # Pass the resolved branch through so deploy.sh operates on the same branch we
 # just cloned (its own default is main).
 export SCANBOX_REPO_BRANCH="${CLONE_BRANCH}"
+# Tell deploy.sh the checkout is already current: this script just cloned or
+# fetch+reset it with the (ephemeral) token credential, which is destroyed
+# before the handoff by design. deploy.sh must NOT fetch again — it has no
+# credential for the private repo and would die on "could not read Username".
+export SCANBOX_REPO_READY=1
 exec bash "${DEPLOY_DIR}/scripts/deploy/deploy.sh" "$@"
