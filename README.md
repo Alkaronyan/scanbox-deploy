@@ -16,20 +16,28 @@ command is also the update path — re-running it updates the device in place;
 there is no separate upgrade procedure.
 
 What happens, in order: it installs the minimal tools (`git`, `age`), shows a
-passphrase hint and asks for the passphrase (**the only prompt there will ever
-be, and only on the very first provision** — later runs read a token sealed to
-the device and ask for nothing), decrypts a **read-only, single-repo** clone
-token in memory, clones the private repo, and hands off to its `deploy.sh`,
-which installs Docker, provisions the host (kernel headers, USB-gadget
-services, the patched `usb_f_uvc` kernel module), builds and launches the
-container stack, and writes `VERSION`.
+passphrase hint and asks for the passphrase — **the only prompt there will ever
+be, and only on the very first provision**; later runs unlock a token sealed to
+the device itself and ask nothing. Then it decrypts the clone token, clones the
+private repo, and hands off to its `deploy.sh`, which installs Docker,
+provisions the host (kernel headers, USB-gadget services, the patched
+`usb_f_uvc` kernel module), builds and launches the container stack, and writes
+`VERSION`.
 
-## First provision: one reboot
+The embedded clone token is `age`-encrypted and **read-only, scoped to one
+repo** — the passphrase is the only secret you carry.
 
-On a fresh Pi the deploy must enable USB device mode
-(`dtoverlay=dwc2,dr_mode=peripheral`), which only takes effect after a
-reboot. When you see `REBOOT REQUIRED`, just reboot — the USB webcam gadget
-assembles and binds itself at boot. No re-run needed.
+## First provision: one reboot, handled for you
+
+A fresh Pi must be switched into USB device mode, which only takes effect on
+boot. The deploy does this itself: when every step has succeeded it prints
+`REBOOT REQUIRED` and **reboots after a 10-second countdown** (Ctrl-C aborts;
+`SCANBOX_NO_REBOOT=1` skips the reboot and tells you to do it yourself). If any
+step had failed, it stops instead — a broken device is never rebooted out from
+under you.
+
+The gadget assembles and binds itself on the way back up. **Nothing needs to be
+re-run.**
 
 ## Verify it worked
 
@@ -40,32 +48,16 @@ into (any camera app, no driver needed). On the Pi itself:
 ~/scanbox/host/boot_selftest.sh
 ```
 
-A read-only boot-to-webcam self-check — 4/4 PASS means gadget bound, stack
-up, video device fed, stream alive. The web UI (an operator/debug surface
-over LAN/WiFi, never over the USB link) is at `http://<pi-ip>`.
+A read-only boot-to-webcam self-check — 4/4 PASS means gadget bound, stack up,
+video device fed, stream alive.
 
-## Test it without provisioning
+## If something goes wrong
 
-Decrypt + clone only (into a throwaway dir, stops before `deploy.sh`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap.sh \
-  | SCANBOX_BOOTSTRAP_CLONE_ONLY=1 SCANBOX_DEPLOY_DIR=/tmp/sbx-test bash
-```
-
-> **The env vars go on the `bash` side of the pipe, not before `curl`.** In
-> `VAR=x curl … | bash`, `VAR` is set for `curl` and never reaches the script —
-> so it would run with defaults (deploying into `$HOME/scanbox`). Put them after
-> the `|`, on `bash`. (A safety guard also refuses to `reset --hard` a checkout
-> with uncommitted changes; override with `SCANBOX_BOOTSTRAP_FORCE=1`.)
-
-## Why the token is safe in the open
-
-The clone token embedded in `bootstrap.sh` is **`age`-encrypted** with a
-passphrase — useless without it — and is a **fine-grained, read-only token
-scoped to only the `scanbox` repo**. Worst case it grants reading one repo.
-The passphrase is the only secret the operator carries; it lives nowhere in
-this file (there is a public *hint*, never the passphrase).
+Every run is written in full to **`~/scanbox/deploy.log`** — screen output
+scrolls thousands of lines during a first provision, so the log, not the
+terminal, is the record. Each run is appended under a dated header. If the
+clone itself never happened (no network, wrong passphrase), the log lands at
+`~/scanbox-deploy-failed.log` instead.
 
 ## Overrides
 
@@ -73,8 +65,12 @@ this file (there is a public *hint*, never the passphrase).
 |---|---|---|
 | `SCANBOX_REPO_BRANCH` | `uvc-webcam-beta` | branch to deploy; falls back to the remote default (with a warning) if it is gone |
 | `SCANBOX_DEPLOY_DIR` | `$HOME/scanbox` | where to clone |
-| `SCANBOX_BOOTSTRAP_CLONE_ONLY` | — | if set, stop after decrypt + clone (test mode) |
+| `SCANBOX_NO_REBOOT` | — | if set, never reboot automatically; print the instruction instead |
 | `SCANBOX_PASSPHRASE_HINT` | *(baked in)* | override the printed hint |
+
+> Env vars go on the `bash` side of the pipe, not before `curl`. In
+> `VAR=x curl … | bash`, `VAR` is set for `curl` and never reaches the script.
+> Put them after the `|`, on `bash`.
 
 ## Updating this repo
 

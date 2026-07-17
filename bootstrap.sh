@@ -50,6 +50,18 @@ PASSPHRASE_HINT="${SCANBOX_PASSPHRASE_HINT:-La de PaKithor}"
 log() { printf '\033[36m[bootstrap]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[bootstrap] %s\033[0m\n' "$*" >&2; exit 1; }
 
+# ---- deploy log (prelude) ----------------------------------------------------
+# Tee everything from here on: the screen is not a record — a first provision
+# scrolls thousands of lines. The checkout that holds the real log does not
+# exist yet (we are about to create it), so write to a temp file and pass the
+# path on; deploy.sh inherits this stdout through the exec handoff, so this one
+# file ends up holding the whole story, and deploy.sh folds it into
+# <checkout>/deploy.log at the end. The passphrase is unaffected: age reads and
+# echoes it on /dev/tty, never through this pipe.
+SCANBOX_LOG_TMP="$(mktemp /tmp/scanbox-deploy.XXXXXX.log)"
+exec > >(tee -a "${SCANBOX_LOG_TMP}") 2>&1
+export SCANBOX_LOG_TMP
+
 case "${REPO_TOKEN_AGE}" in
   *PASTE*) die "bootstrap.sh still has the placeholder token — run scripts/deploy/encrypt_repo_token.sh and paste its output between the AGE markers." ;;
 esac
