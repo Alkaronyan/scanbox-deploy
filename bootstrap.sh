@@ -30,12 +30,12 @@ DEPLOY_DIR="${SCANBOX_DEPLOY_DIR:-${HOME}/scanbox}"
 # Replace the placeholder with the output of scripts/deploy/encrypt_repo_token.sh.
 REPO_TOKEN_AGE=$(cat <<'AGE'
 -----BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBtMTJaYXVZWlA5OUl1VThI
-NXBTelpRIDE4CmljWnRGcCtLNEdXTUF0cGpoOXNUVDlxdlZFY0RHQjdobnRQRVg3
-bmN3M00KLS0tIEltRDZUNTlmZFFrTFJQY25WdXRmVkR4TzF1KzVlVk1LNEpqYWFp
-Vzduek0KH5zNpNgupXp6Xo5Z/irlOtMweYD90uNl4ybx0pic+CrlsTJIf6sinDD0
-5NEmNFl7wZZ2HXtqW+TTl+jHdpntTvyUjsxFIfRQ/Zh3uXb1TztEfIisY5gshuKk
-ZALKf9ulzYiDHeHKUqJ6H2+lzPvoZKNcbOR/ViJu0AK+lkA=
+YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBnL1pJZTdXYWNIME5Wczdy
+VWFsN1VBIDE4ClhFN0Z2VGxpb0ZTdDdsODFGZkhST284Y3k3U2NQTTNlQUY4aFlP
+N2lObjAKLS0tIExCTHMvZ3JlcU9HNVpQMWt5enk1Tk1nUmRHQlc0ZnZNVnlVTWsr
+SDA3SDQK2GDp8VkgEBjU0m+aRnlp8qb+eHHUWXAoFamUan8UWsUSIx1GhgF420hF
+NTYmtqzR/reSh12zCpJ084m9zE2HwCZ4dRupjQZRj+kaYIu3VLOGHiti3jfQNXuO
+tz62m582dOc5FiQ4214GFwmV3nb10N41zd39nVYG6AVpTPQ=
 -----END AGE ENCRYPTED FILE-----
 AGE
 )
@@ -45,7 +45,7 @@ AGE
 # it with your own reminder (a password-manager entry name, "the bench secret",
 # …) — meaningful to you but useless to a stranger. Overridable via
 # SCANBOX_PASSPHRASE_HINT.
-PASSPHRASE_HINT="${SCANBOX_PASSPHRASE_HINT:-La de PaKithor}"
+PASSPHRASE_HINT="${SCANBOX_PASSPHRASE_HINT:-Old naming}"
 
 log() { printf '\033[36m[bootstrap]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[bootstrap] %s\033[0m\n' "$*" >&2; exit 1; }
