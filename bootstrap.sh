@@ -124,10 +124,33 @@ URL="https://github.com/${REPO}.git"
 # keeps working without editing this file.
 if git ls-remote --exit-code --heads "${URL}" "${BRANCH}" >/dev/null 2>&1; then
   CLONE_BRANCH="${BRANCH}"
+elif [ -d "${DEPLOY_DIR}/.git" ]; then
+  # The branch is gone from the remote, which means it was merged away. Go to
+  # the branch its code now LIVES in — the one containing this node's last
+  # commit — not to the remote's default branch.
+  #
+  # That fallback used to be `main`, and it is the same defect that stranded
+  # both benches on 2026-08-07 (J16): a node quietly moved onto a lineage
+  # nobody deploys, taking .gitignore with it. It was survivable while this
+  # script always prompted for a passphrase, because a human was watching. A
+  # node with a valid sealed token is no longer asked — proven on glnode0,
+  # 2026-08-07 — so the fallback could move a node's branch unattended.
+  #
+  # Nearest wins: the branch fewest commits ahead of ours, so a long-lived
+  # integration branch beats `main` when both contain us.
+  git -C "${DEPLOY_DIR}" fetch --quiet --prune origin 2>/dev/null || true
+  _here="$(git -C "${DEPLOY_DIR}" rev-parse --verify --quiet HEAD || true)"
+  CLONE_BRANCH="$(git -C "${DEPLOY_DIR}" for-each-ref --format='%(refname:short)' 'refs/remotes/origin/*' 2>/dev/null       | grep -v '^origin/HEAD$'       | while read -r r; do
+            if git -C "${DEPLOY_DIR}" merge-base --is-ancestor "${_here}" "${r}" 2>/dev/null; then
+                echo "$(git -C "${DEPLOY_DIR}" rev-list --count "${_here}..${r}") ${r#origin/}"
+            fi
+        done | sort -n | head -1 | awk '{print $2}')"
+  [ -n "${CLONE_BRANCH}" ]     || die "branch '${BRANCH}' is gone from the remote and no other branch contains this node's commit. Say which one with SCANBOX_REPO_BRANCH=<name>."
+  log "branch '${BRANCH}' is gone from the remote; its code now lives in '${CLONE_BRANCH}' — following it."
 else
-  CLONE_BRANCH="$(git ls-remote --symref "${URL}" HEAD 2>/dev/null | awk '/^ref:/{sub("refs/heads/","",$2); print $2; exit}')"
-  [ -n "${CLONE_BRANCH}" ] || CLONE_BRANCH="main"
-  log "WARNING: branch '${BRANCH}' not found on the remote — falling back to the default branch '${CLONE_BRANCH}'."
+  # A first provision has nothing to trace from: no checkout, no commit. There
+  # is no honest way to infer where the code went, so ask rather than guess.
+  die "branch '${BRANCH}' is not on the remote and this machine has no checkout to infer a successor from. Set SCANBOX_REPO_BRANCH=<name>, or update this script's BRANCH."
 fi
 
 if [ -d "${DEPLOY_DIR}/.git" ]; then
