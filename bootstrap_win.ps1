@@ -1,23 +1,23 @@
 <#
 .SYNOPSIS
-    flash.ps1 - SCANBOX PC-side provisioning. Takes a bare CM4 with a blank
+    bootstrap_win.ps1 - SCANBOX PC-side provisioning. Takes a bare CM4 with a blank
     eMMC to a running, deployed node with one command and one passphrase.
 
 .DESCRIPTION
-    This is the other half of scripts/deploy/bootstrap.sh. bootstrap.sh runs ON
-    the node and does the deploy; flash.ps1 runs on the operator's Windows PC
-    and produces a node that will run bootstrap.sh by itself.
+    This is the other half of scripts/deploy/bootstrap_node.sh. bootstrap_node.sh runs ON
+    the node and does the deploy; bootstrap_win.ps1 runs on the operator's Windows PC
+    and produces a node that will run bootstrap_node.sh by itself.
 
     What it replaces, step for step, is the procedure performed today: open
     Raspberry Pi Imager, fill in the OS-customisation dialog, move the nRPIBOOT
     jumper, write the image, wait, move the jumper back, find the node's
-    address, SSH in, and run bootstrap.sh. After this script the operator moves
+    address, SSH in, and run bootstrap_node.sh. After this script the operator moves
     the jumper twice - the two things no software can do - and types the deploy
     passphrase once.
 
     ONE ENCRYPTED ARTEFACT, NOT TWO
       The AGE block and PASSPHRASE_HINT below are the SAME blob and the SAME
-      hint that scripts/deploy/bootstrap.sh carries. They are not a second copy
+      hint that scripts/deploy/bootstrap_node.sh carries. They are not a second copy
       of the secret; they are the same ciphertext, and exactly one passphrase in
       the world opens it.
 
@@ -31,7 +31,7 @@
       of each file against its source, and additionally checks that the two
       served files carry byte-identical blobs and hints.
 
-      flash.ps1 uses the blob to fetch the repository files it needs when this
+      bootstrap_win.ps1 uses the blob to fetch the repository files it needs when this
       PC has no checkout, by decrypting the clone token for a sparse clone.
 
       IT DOES NOT VERIFY THE PASSPHRASE, except by accident. age reads a
@@ -93,7 +93,7 @@ param(
     # and prints the one command to run over SSH.
     [switch] $NoPassphrase,
 
-    # Use this checkout instead of cloning. Set automatically when flash.ps1 is
+    # Use this checkout instead of cloning. Set automatically when bootstrap_win.ps1 is
     # run from inside a scanbox checkout.
     [string] $RepoRoot,
 
@@ -108,27 +108,23 @@ $ErrorActionPreference = 'Stop'
 # Constants
 # =============================================================================
 
-# ---- encrypted read-only repo token (age -p, armored) -----------------------
-# THE SAME BLOB AS bootstrap.sh. Replaced by scripts/deploy/publish_bootstrap.sh,
-# which patches both files in one rotation. Do not hand-edit either copy.
-$REPO_TOKEN_AGE = @'
------BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBnL1pJZTdXYWNIME5Wczdy
-VWFsN1VBIDE4ClhFN0Z2VGxpb0ZTdDdsODFGZkhST284Y3k3U2NQTTNlQUY4aFlP
-N2lObjAKLS0tIExCTHMvZ3JlcU9HNVpQMWt5enk1Tk1nUmRHQlc0ZnZNVnlVTWsr
-SDA3SDQK2GDp8VkgEBjU0m+aRnlp8qb+eHHUWXAoFamUan8UWsUSIx1GhgF420hF
-NTYmtqzR/reSh12zCpJ084m9zE2HwCZ4dRupjQZRj+kaYIu3VLOGHiti3jfQNXuO
-tz62m582dOc5FiQ4214GFwmV3nb10N41zd39nVYG6AVpTPQ=
------END AGE ENCRYPTED FILE-----
-'@
-
-# ---- passphrase reminder (safe to be public - a memory jog, NEVER the passphrase)
-# THE SAME HINT AS bootstrap.sh, patched by the same publisher.
-$PASSPHRASE_HINT = 'Old naming'
+# ---- the shared artefacts, fetched rather than embedded ---------------------
+# This file used to carry a copy of bootstrap_node.sh's encrypted token and its hint,
+# kept in step by a publisher that patched both by regular expression and then
+# compared them. One artefact, two carriers, and a guard that only covered what
+# somebody remembered to add to it - the default branch is duplicated the same
+# way and nothing checks it.
+#
+# One copy now, served next to bootstrap_node.sh, fetched by both halves. Rotation
+# replaces one file. The cost is that a flash needs the network to decrypt; it
+# already needs it for the image, so nothing changes in practice.
+$DEPLOY_BASE_URL = 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main'
+$TOKEN_AGE_URL   = "$DEPLOY_BASE_URL/token.age"
+$HINT_URL        = "$DEPLOY_BASE_URL/token.age.hint"
 
 $REPO_BRANCH   = 'uvc-webcam-beta'
 $REPO_URL      = 'https://github.com/Alkaronyan/scanbox.git'
-$BOOTSTRAP_URL = 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap.sh'
+$BOOTSTRAP_URL = 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap_node.sh'
 
 # The pinned OS image: Debian 13 (trixie) 64-bit Lite, Raspberry Pi build.
 # IMAGE_RAW_SHA256 is the hash of the DECOMPRESSED .img - it is the value
@@ -266,7 +262,7 @@ function Register-Install {
         path        = $Path
         note        = $Note
         recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
-        installedBy = $(if ($PreExisted) { 'other' } else { 'flash.ps1' })
+        installedBy = $(if ($PreExisted) { 'other' } else { 'bootstrap_win.ps1' })
     }
     $m.entries = $entries
     Write-Manifest $m
@@ -310,6 +306,31 @@ function Get-OpenSslPath {
     if ($cmd) { $candidates = @($cmd.Source) + $candidates }
     foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
     return $null
+}
+
+# Fetch the published artefacts. Named separately when they fail, because
+# "could not get the token" cannot tell a dead network from a repository that
+# stopped serving the file, and those need different actions.
+function Get-PublishedBlob {
+    try {
+        $r = Invoke-WebRequest -Uri $TOKEN_AGE_URL -UseBasicParsing -ErrorAction Stop
+    } catch {
+        throw "could not fetch the encrypted token from $TOKEN_AGE_URL ($($_.Exception.Message)). Network, or it is not published there."
+    }
+    $blob = [string]$r.Content
+    if ($blob -notmatch 'BEGIN AGE ENCRYPTED FILE') {
+        throw "$TOKEN_AGE_URL did not return an age file. Refusing to hand it to age."
+    }
+    return $blob
+}
+
+function Get-PublishedHint {
+    try {
+        $r = Invoke-WebRequest -Uri $HINT_URL -UseBasicParsing -ErrorAction Stop
+        $h = ([string]$r.Content -split "`n")[0].Trim()
+        if ($h) { return $h }
+    } catch { }
+    return "(hint unavailable - $HINT_URL could not be read)"
 }
 
 function Get-AgePath {
@@ -505,7 +526,7 @@ function Get-AuthorizedKeys {
 
 # Open the blob HERE and put the TOKEN on the card, not the passphrase.
 #
-# WHY, and it is not about how either one works. The blob inside bootstrap.sh is
+# WHY, and it is not about how either one works. The blob inside bootstrap_node.sh is
 # published on purpose - it is the whole point of a public entry point. So a
 # card carrying the master passphrase carries every token that blob will ever
 # hold, for every node, and revoking it means rotating everything. A card
@@ -534,11 +555,11 @@ function Get-DeployToken {
                '-NoPassphrase to write a card with no credential at all and run bootstrap by hand.')
     }
     $blob = Join-Path $env:TEMP ('sbxblob_' + [guid]::NewGuid().ToString('N') + '.age')
-    [IO.File]::WriteAllText($blob, $REPO_TOKEN_AGE, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($blob, (Get-PublishedBlob), (New-Object Text.UTF8Encoding($false)))
     try {
         Write-Host ''
         Write-Host 'Deploy passphrase (the only thing this script asks you for).' -ForegroundColor Yellow
-        Write-Host "  hint: $PASSPHRASE_HINT" -ForegroundColor Yellow
+        Write-Host "  hint: $(Get-PublishedHint)" -ForegroundColor Yellow
         Write-Host '  age asks for it at ITS OWN prompt below - this script never sees it.'
         Write-Host '  A successful decrypt is also the check that it was the right one.'
         $token = (& $age -d $blob) -join ''
@@ -555,13 +576,13 @@ function Get-DeployToken {
 # =============================================================================
 # Repo source
 #
-# flash.ps1 reads exactly three directories: host/cloudinit (the templates),
+# bootstrap_win.ps1 reads exactly three directories: host/cloudinit (the templates),
 # host/profiles (the per-node facts) and host/kernel (the allowlist). Cloning
 # the whole repository to read three directories is both slow and more than this
 # script is entitled to, so the standalone path uses a blobless, cone-mode
 # sparse checkout.
 #
-# When flash.ps1 is run from inside a checkout - which is how it is used during
+# When bootstrap_win.ps1 is run from inside a checkout - which is how it is used during
 # development and how the owner will normally run it - that checkout is used and
 # nothing is cloned or downloaded at all.
 # =============================================================================
@@ -589,10 +610,12 @@ function Get-SparseCheckout {
 
     Write-Step 'No local checkout - fetching the three directories this script reads.'
     $blob = Join-Path $env:TEMP ('sbxblob_' + [guid]::NewGuid().ToString('N') + '.age')
-    [IO.File]::WriteAllText($blob, $REPO_TOKEN_AGE, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($blob, (Get-PublishedBlob), (New-Object Text.UTF8Encoding($false)))
+    $tokFile = $null
+    $askFile = $null
     try {
         Write-Host ''
-        Write-Host "age will now ask for the deploy passphrase (hint: $PASSPHRASE_HINT)." -ForegroundColor Yellow
+        Write-Host "age will now ask for the deploy passphrase (hint: $(Get-PublishedHint))." -ForegroundColor Yellow
         Write-Host 'Type it at ITS prompt. A successful decrypt is also the verification that'
         Write-Host 'the passphrase is right - the one place in this flow where that is possible.'
         $token = (& $age -d $blob) -join ''
@@ -600,21 +623,49 @@ function Get-SparseCheckout {
 
         if (Test-Path $CLONE_DIR) { Remove-Item -Recurse -Force $CLONE_DIR }
         New-Item -ItemType Directory -Force -Path $CLONE_DIR | Out-Null
-        # The token goes into the URL of a temporary remote only, and the whole
-        # directory is discarded at the end of the run.
-        $url = "https://x-access-token:$token@github.com/Alkaronyan/scanbox.git"
+
+        # THE TOKEN DOES NOT GO IN THE URL. It used to, with a comment saying the
+        # remote was temporary - which addressed where the credential was STORED
+        # and not where it was SHOWN. Invoke-Shown prints every command it runs,
+        # so that clone printed the token in cleartext to the console and into
+        # any transcript of the run. bootstrap_node.sh has never done this: it feeds
+        # git through an askpass shim precisely so the credential reaches no
+        # command line. This is the same shim, in the other language.
+        #
+        # Two temporary files, both in the user's own TEMP, both removed in the
+        # finally below whatever happens: one holds the token, one is the shim
+        # that prints it. git calls the shim with a prompt string and takes one
+        # line of its output - "Username" gets the fixed account name that
+        # GitHub tokens use, anything else gets the token itself.
+        $tokFile = Join-Path $env:TEMP ('sbxtok_' + [guid]::NewGuid().ToString('N') + '.txt')
+        $askFile = Join-Path $env:TEMP ('sbxask_' + [guid]::NewGuid().ToString('N') + '.cmd')
+        [IO.File]::WriteAllText($tokFile, $token, (New-Object Text.UTF8Encoding($false)))
+        # Owner-only, so another account on this PC cannot read it while it exists.
+        & icacls.exe $tokFile /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+        $shim = "@echo off`r`n" +
+                "echo %1 | findstr /i `"sername`" >nul && (echo x-access-token& exit /b 0)`r`n" +
+                "type `"$tokFile`"`r`n"
+        [IO.File]::WriteAllText($askFile, $shim, (New-Object Text.ASCIIEncoding))
+        $token = $null
+        [GC]::Collect()
+
+        $url = 'https://github.com/Alkaronyan/scanbox.git'
+        $env:GIT_ASKPASS = $askFile
+        $env:GIT_TERMINAL_PROMPT = '0'
         Invoke-Shown $git @('clone', '--quiet', '--filter=blob:none', '--no-checkout', '--depth', '1', '--branch', $REPO_BRANCH, $url, $CLONE_DIR) | Out-Null
         Invoke-Shown $git @('-C', $CLONE_DIR, 'sparse-checkout', 'set', '--cone', 'host/cloudinit', 'host/profiles', 'host/kernel') | Out-Null
         Invoke-Shown $git @('-C', $CLONE_DIR, 'checkout', '--quiet') | Out-Null
-        # Do not leave the credential behind in .git/config.
-        Invoke-Shown $git @('-C', $CLONE_DIR, 'remote', 'set-url', 'origin', 'https://github.com/Alkaronyan/scanbox.git') | Out-Null
-        $token = $null
-        [GC]::Collect()
-        Write-Ok "sparse checkout at $CLONE_DIR"
+        # No set-url is needed any more: the remote was never written with a
+        # credential in it, so there is nothing in .git/config to undo.
+        Write-Ok "sparse checkout at $CLONE_DIR (the token reached git through an askpass shim, never a URL)"
         Invoke-Shown $git @('-C', $CLONE_DIR, 'sparse-checkout', 'list') | Out-Null
         return $CLONE_DIR
     } finally {
         Remove-Item -Force -ErrorAction SilentlyContinue $blob
+        if ($tokFile) { Remove-Item -Force -ErrorAction SilentlyContinue $tokFile }
+        if ($askFile) { Remove-Item -Force -ErrorAction SilentlyContinue $askFile }
+        Remove-Item -Force -ErrorAction SilentlyContinue Env:\GIT_ASKPASS
+        Remove-Item -Force -ErrorAction SilentlyContinue Env:\GIT_TERMINAL_PROMPT
     }
 }
 
@@ -1326,7 +1377,7 @@ function Find-BootPartition {
 # =============================================================================
 
 function Invoke-Cleanup {
-    Write-Step 'Cleanup - undoing only what flash.ps1 installed.'
+    Write-Step 'Cleanup - undoing only what bootstrap_win.ps1 installed.'
     $m = Read-Manifest
     if (-not $m.entries -or @($m.entries).Count -eq 0) {
         Write-Ok "manifest $MANIFEST_PATH records no installs - there is nothing of ours to remove."
@@ -1503,7 +1554,7 @@ function Invoke-Flash {
     Write-Host '   1. Power the board OFF and REMOVE the nRPIBOOT jumper.' -ForegroundColor Yellow
     Write-Host '   2. Power it on with the network cable in.' -ForegroundColor Yellow
     Write-Host ''
-    Write-Host "   It will boot, take its identity from the seed, fetch bootstrap.sh, deploy"
+    Write-Host "   It will boot, take its identity from the seed, fetch bootstrap_node.sh, deploy"
     Write-Host "   itself and reboot once. Expect roughly 30-60 minutes for a first provision."
     Write-Host "   Its record is /var/log/scanbox-provision.log and then ~/scanbox/deploy.log."
     Write-Host "   Verify with:  ssh $($ctx.Map.SSH_USER)@$($ctx.Map.HOSTNAME) '~/scanbox/host/boot_selftest.sh'"
@@ -1512,7 +1563,7 @@ function Invoke-Flash {
 function Show-Menu {
     while ($true) {
         Write-Host ''
-        Write-Host '  SCANBOX flash.ps1' -ForegroundColor Cyan
+        Write-Host '  SCANBOX bootstrap_win.ps1' -ForegroundColor Cyan
         Write-Host '  ================='
         Write-Host '   1) Flash a board          - the whole path, bare eMMC to a deployed node'
         Write-Host '   2) Render a seed only     - no board, no writing; produces the four files'

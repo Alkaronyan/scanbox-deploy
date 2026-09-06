@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# bootstrap.sh — SCANBOX public deploy entry point.
+# bootstrap_node.sh — SCANBOX public deploy entry point.
 # =============================================================================
 # Host this file publicly (a public gist or a small public repo). The private
 # code repo stays private; this file carries only an *encrypted* read-only
 # clone token, so it is safe in the open.
 #
-#   curl -fsSL <public-url>/bootstrap.sh | bash
+#   curl -fsSL <public-url>/bootstrap_node.sh | bash
 #
 # Flow: install the minimal tools to decrypt+clone (git, age) -> ask for the
 # passphrase -> decrypt the read-only token in memory -> clone the private
@@ -29,26 +29,27 @@ REPO="${SCANBOX_REPO:-Alkaronyan/scanbox}"
 BRANCH="${SCANBOX_REPO_BRANCH:-uvc-webcam-beta}"
 DEPLOY_DIR="${SCANBOX_DEPLOY_DIR:-${HOME}/scanbox}"
 
-# ---- encrypted read-only repo token (age -p, armored) -----------------------
-# Replace the placeholder with the output of scripts/deploy/encrypt_repo_token.sh.
-REPO_TOKEN_AGE=$(cat <<'AGE'
------BEGIN AGE ENCRYPTED FILE-----
-YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdCBnL1pJZTdXYWNIME5Wczdy
-VWFsN1VBIDE4ClhFN0Z2VGxpb0ZTdDdsODFGZkhST284Y3k3U2NQTTNlQUY4aFlP
-N2lObjAKLS0tIExCTHMvZ3JlcU9HNVpQMWt5enk1Tk1nUmRHQlc0ZnZNVnlVTWsr
-SDA3SDQK2GDp8VkgEBjU0m+aRnlp8qb+eHHUWXAoFamUan8UWsUSIx1GhgF420hF
-NTYmtqzR/reSh12zCpJ084m9zE2HwCZ4dRupjQZRj+kaYIu3VLOGHiti3jfQNXuO
-tz62m582dOc5FiQ4214GFwmV3nb10N41zd39nVYG6AVpTPQ=
------END AGE ENCRYPTED FILE-----
-AGE
-)
+# ---- where the shared artefacts live ---------------------------------------
+# The encrypted token is NOT embedded here any more, and neither is the hint.
+#
+# They used to be pasted into this file AND into bootstrap_win.ps1, because bash and
+# PowerShell share no code. Two copies of one secret artefact, kept in step by a
+# publisher that patched both by regular expression and then compared them. That
+# guard worked - and it only ever covered what somebody remembered to add to it:
+# the default branch is duplicated between the two halves in exactly the same
+# way and nothing checks it at all.
+#
+# So there is one copy now, served next to this script, and both halves fetch
+# it. Rotation replaces one file instead of patching two, and the drift cannot
+# happen rather than being detected.
+#
+# The base is derived from an overridable variable rather than hard-coded per
+# artefact, so a fork or a mirror stays consistent with itself: whoever serves
+# this script serves its token.
+DEPLOY_BASE_URL="${SCANBOX_DEPLOY_BASE_URL:-https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main}"
+TOKEN_AGE_URL="${DEPLOY_BASE_URL}/token.age"
+HINT_URL="${DEPLOY_BASE_URL}/token.age.hint"
 
-# ---- passphrase reminder (safe to be public — a memory jog, NEVER the passphrase)
-# Printed right before the prompt so you know which passphrase to type. Replace
-# it with your own reminder (a password-manager entry name, "the bench secret",
-# …) — meaningful to you but useless to a stranger. Overridable via
-# SCANBOX_PASSPHRASE_HINT.
-PASSPHRASE_HINT="${SCANBOX_PASSPHRASE_HINT:-Old naming}"
 
 # ---- one elapsed clock for the WHOLE cold deploy ----------------------------
 # deploy.sh stamps its lines; this script did not, and the untimed span is the
@@ -110,9 +111,6 @@ SCANBOX_LOG_STAMPED=1
 export SCANBOX_LOG_STAMPED
 export SCANBOX_LOG_TMP
 
-case "${REPO_TOKEN_AGE}" in
-  *PASTE*) die "bootstrap.sh still has the placeholder token — run scripts/deploy/encrypt_repo_token.sh and paste its output between the AGE markers." ;;
-esac
 
 # ---- 1. minimal deps to decrypt + clone (deploy.sh installs the rest) --------
 missing=""
@@ -142,7 +140,7 @@ fi
 # A token HANDED OVER for this run, ahead of the passphrase and behind the
 # device's own identity.
 #
-# It exists for one caller: scripts/deploy/flash.ps1, which has already opened
+# It exists for one caller: scripts/deploy/bootstrap_win.ps1, which has already opened
 # the blob on the PC because the operator typed the passphrase there. Without
 # this branch the only way to get a first provision unattended is to put the
 # MASTER PASSPHRASE on the card - and the embedded blob is public, so a card
@@ -183,10 +181,24 @@ if [ -z "${TOKEN}" ] && [ -n "${SCANBOX_REPO_TOKEN_FILE:-}" ]; then
 fi
 
 if [ -z "${TOKEN}" ]; then
+  # Two fetches now instead of none, and each one is named when it fails. A
+  # single "could not get the token" would leave the operator unable to tell a
+  # network that is down from a repository that no longer serves the artefact.
+  BLOB="$(curl -fsSL "${TOKEN_AGE_URL}")" \
+    || die "could not fetch the encrypted token from ${TOKEN_AGE_URL} (network, or it is not published there)."
+  case "${BLOB}" in
+    *"BEGIN AGE ENCRYPTED FILE"*) : ;;
+    *) die "${TOKEN_AGE_URL} did not return an age file. Refusing to hand it to age." ;;
+  esac
+  # The hint is a convenience: a node that cannot fetch it can still be
+  # provisioned, so its absence is reported and not fatal.
+  HINT="$(curl -fsSL "${HINT_URL}" 2>/dev/null | head -n 1)" || HINT=""
+  [ -n "${HINT}" ] || HINT="(hint unavailable - ${HINT_URL} could not be read)"
+
   log "decrypting the deploy token."
-  printf '\033[36m[bootstrap]\033[0m \033[33mpassphrase hint:\033[0m %s\n' "${PASSPHRASE_HINT}"
+  printf '\033[36m[bootstrap]\033[0m \033[33mpassphrase hint:\033[0m %s\n' "${SCANBOX_PASSPHRASE_HINT:-${HINT}}"
   log "enter the passphrase when prompted:"
-  TOKEN="$(printf '%s' "${REPO_TOKEN_AGE}" | age -d)" || die "decryption failed (wrong passphrase?)."
+  TOKEN="$(printf '%s' "${BLOB}" | age -d)" || die "decryption failed (wrong passphrase?)."
   [ -n "${TOKEN}" ] || die "empty token after decryption."
 fi
 

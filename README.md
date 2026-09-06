@@ -2,9 +2,9 @@
 # scanbox-deploy
 
 Public deploy entry point for the **private** [`Alkaronyan/scanbox`](https://github.com/Alkaronyan/scanbox)
-subsystem. This repo holds the two halves of provisioning — `bootstrap.sh`,
-which runs **on the device**, and `flash.ps1`, which runs **on a Windows PC** and
-produces a device that runs `bootstrap.sh` by itself — plus this README, the
+subsystem. This repo holds the two halves of provisioning — `bootstrap_node.sh`,
+which runs **on the device**, and `bootstrap_win.ps1`, which runs **on a Windows PC** and
+produces a device that runs `bootstrap_node.sh` by itself — plus this README, the
 operator's guide.
 
 Both carry the same encrypted, read-only clone token. Anyone with the deploy
@@ -14,7 +14,7 @@ file.
 ## Provision or update a device (one command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap_node.sh | bash
 ```
 
 Run it on the device (Raspberry Pi OS Lite 64-bit, network up). The same
@@ -45,20 +45,20 @@ under you.
 The gadget assembles and binds itself on the way back up. **Nothing needs to be
 re-run.**
 
-## A bare board, from nothing: `flash.ps1`
+## A bare board, from nothing: `bootstrap_win.ps1`
 
 Everything above assumes a device that already boots and is on the network.
-`flash.ps1` is for the case before that — a Compute Module with a blank eMMC.
+`bootstrap_win.ps1` is for the case before that — a Compute Module with a blank eMMC.
 Run it on a Windows PC with the module attached over USB:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File flash.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap_win.ps1
 ```
 
 It presents a numbered menu; option 1 is the whole path. It writes the pinned
 Raspberry Pi OS image, then writes a cloud-init seed that gives the board its
 name, clock, account, keys and passwordless sudo, and finally has the board
-fetch and run the `bootstrap.sh` above on its own.
+fetch and run the `bootstrap_node.sh` above on its own.
 
 **You are asked for one thing and asked to do two:**
 
@@ -79,7 +79,7 @@ comes up provisioned and reachable, and prints the one command to finish it over
 SSH.
 
 Requirements on the PC: Windows PowerShell 5.1, Git for Windows (for `openssl`),
-Raspberry Pi Imager, and `age`. `flash.ps1 -Action probe` reports which of those
+Raspberry Pi Imager, and `age`. `bootstrap_win.ps1 -Action probe` reports which of those
 are present without changing anything, and `-Action cleanup` removes only what
 the script itself installed — recorded when it installs, never guessed at
 afterwards.
@@ -123,11 +123,11 @@ clone itself never happened (no network, wrong passphrase), the log lands at
 ## Updating this repo
 
 All three files here are **published copies** — the sources live in the private
-repo (`scripts/deploy/bootstrap.sh`, `scripts/deploy/flash.ps1` and
+repo (`scripts/deploy/bootstrap_node.sh`, `scripts/deploy/bootstrap_win.ps1` and
 `scripts/deploy/README_DEPLOY.md`), and `scripts/deploy/publish_bootstrap.sh`
 there is the only sanctioned way to publish them (token rotation included).
 
-`bootstrap.sh` and `flash.ps1` are published **together, in one commit**,
+`bootstrap_node.sh` and `bootstrap_win.ps1` are published **together, in one commit**,
 because they carry one token between them: the publisher patches both blobs in a
 single rotation and refuses to push if they disagree. Never hand-edit the copies
 here — a drift test in the private repo diffs served against source, and also
