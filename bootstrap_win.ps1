@@ -15,39 +15,31 @@
     the jumper twice - the two things no software can do - and types the deploy
     passphrase once.
 
-    ONE ENCRYPTED ARTEFACT, NOT TWO
-      The AGE block and PASSPHRASE_HINT below are the SAME blob and the SAME
-      hint that scripts/deploy/bootstrap_node.sh carries. They are not a second copy
-      of the secret; they are the same ciphertext, and exactly one passphrase in
-      the world opens it.
+    ONE ENCRYPTED ARTEFACT, AND NEITHER SCRIPT CARRIES IT
+      The blob is not in this file and not in bootstrap_node.sh. It is published
+      as token.age, served beside them, and both halves fetch it.
 
-      Bash and PowerShell share no code, so what is shared here is the
-      ARTEFACT, the HINT, and the PUBLISHER:
-      scripts/deploy/publish_bootstrap.sh patches BOTH files in a single
-      rotation and pushes both to the public scanbox-deploy repo. It cannot
-      rotate one without the other, which is the only reason these two blobs
-      can be trusted to be the same blob. The smoke test
-      (Vid_Mux_TEST/tests/deploy/smoke_test.sh section 7) diffs the served copy
-      of each file against its source, and additionally checks that the two
-      served files carry byte-identical blobs and hints.
+      It used to be pasted into both, because bash and PowerShell share no code,
+      and publish_bootstrap.sh kept the two copies in step by patching them
+      together and comparing them. That guard is the argument against itself: it
+      covered the blob and the hint because somebody added those to it, while
+      the default deploy branch is duplicated between the very same two files
+      and nothing checks it. One artefact cannot drift from itself.
 
-      bootstrap_win.ps1 uses the blob to fetch the repository files it needs when this
-      PC has no checkout, by decrypting the clone token for a sparse clone.
+      This script fetches the blob for two things: to decrypt the clone token
+      for a sparse checkout when this PC has no copy of the repository, and to
+      decrypt the token that goes on the card.
 
-      IT DOES NOT VERIFY THE PASSPHRASE, except by accident. age reads a
-      passphrase from a terminal and from nowhere else - measured, not assumed -
-      so nothing driven from PowerShell can test one, and a check that cannot
-      tell a wrong passphrase from an unreadable one is not a check. The one
-      case where it IS verified is free rather than designed: on a PC with no
-      checkout, age is run against the real console for the sparse clone and a
-      successful decrypt is the proof. On a PC that already has the repository
-      no decryption is needed, nothing is verified, and a mistyped passphrase
-      surfaces on the node - named - in /var/log/scanbox-provision.log.
+      AND IT VERIFIES THE PASSPHRASE, which the previous design could not.
+      age reads a passphrase from a terminal and from nowhere else - measured,
+      not assumed - and that is true of a child process created with NO CONSOLE.
+      This script runs in one, so age can prompt against it, and a successful
+      decrypt IS the check. A mistyped passphrase now fails here, in a second,
+      instead of surfacing on a node twenty minutes later.
 
-      That path also means the passphrase can be asked for TWICE: once at age's
-      own prompt for the clone, and once at this script's prompt for the copy
-      that goes on the card. Only the second one reaches the node, and it is
-      not checked against the first.
+      It is also asked for ONCE. The old shape prompted twice on a PC with no
+      checkout - once at age's prompt for the clone, once at this script's own
+      prompt for the copy that went on the card - and never compared them.
 
     WHAT IT NEVER STORES
       No plaintext password, ever, anywhere. The account password is handled
@@ -118,13 +110,17 @@ $ErrorActionPreference = 'Stop'
 # One copy now, served next to bootstrap_node.sh, fetched by both halves. Rotation
 # replaces one file. The cost is that a flash needs the network to decrypt; it
 # already needs it for the image, so nothing changes in practice.
-$DEPLOY_BASE_URL = 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main'
+# Overridable, and it has to be: the commit that introduced this said the base
+# was 'derived from an overridable variable' while it was a literal here. A fork
+# or a mirror must be able to serve its own artefacts to its own halves.
+$DEPLOY_BASE_URL = if ($env:SCANBOX_DEPLOY_BASE_URL) { $env:SCANBOX_DEPLOY_BASE_URL }
+                   else { 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main' }
 $TOKEN_AGE_URL   = "$DEPLOY_BASE_URL/token.age"
 $HINT_URL        = "$DEPLOY_BASE_URL/token.age.hint"
 
 $REPO_BRANCH   = 'uvc-webcam-beta'
 $REPO_URL      = 'https://github.com/Alkaronyan/scanbox.git'
-$BOOTSTRAP_URL = 'https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap_node.sh'
+$BOOTSTRAP_URL = "$DEPLOY_BASE_URL/bootstrap_node.sh"
 
 # The pinned OS image: Debian 13 (trixie) 64-bit Lite, Raspberry Pi build.
 # IMAGE_RAW_SHA256 is the hash of the DECOMPRESSED .img - it is the value
@@ -506,7 +502,7 @@ function Get-AuthorizedKeys {
 #   (host/cloudinit/provision.sh.tmpl, step 1).
 #
 # WHY THE TOKEN AND NOT THE PASSPHRASE
-#   The embedded blob is PUBLISHED - that is what a public entry point means.
+#   The blob is PUBLISHED - that is what a public entry point means.
 #   So a card carrying the passphrase carries every token that blob will ever
 #   hold, for every node, unrevocably. A card carrying the token carries one
 #   read-only, single-repo credential that GitHub revokes in a click and that
@@ -1469,7 +1465,7 @@ function Invoke-Render {
     if (-not $dest) { $dest = Join-Path (Get-Location) 'seed' }
     $ctx = New-SeedContext -Root $root -BoardSerial $Serial
     Write-Step "Rendering the seed into $dest"
-    [void] (Write-Seed -Root $root -Ctx $ctx -Destination $dest -Passphrase '')
+    [void] (Write-Seed -Root $root -Ctx $ctx -Destination $dest -Token '')
     Write-Host ''
     Write-Ok 'Rendered with no passphrase file. This is the seed only - nothing was flashed.'
 }

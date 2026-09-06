@@ -3,19 +3,26 @@
 # bootstrap_node.sh — SCANBOX public deploy entry point.
 # =============================================================================
 # Host this file publicly (a public gist or a small public repo). The private
-# code repo stays private; this file carries only an *encrypted* read-only
-# clone token, so it is safe in the open.
+# code repo stays private; this file carries NO credential at all. The encrypted
+# read-only clone token is published beside it as token.age, so this file and
+# that one are both safe in the open.
 #
 #   curl -fsSL <public-url>/bootstrap_node.sh | bash
 #
-# Flow: install the minimal tools to decrypt+clone (git, age) -> ask for the
-# passphrase -> decrypt the read-only token in memory -> clone the private
-# repo -> hand off to the repo's own deploy.sh (which does the real host/stack
-# provisioning). The passphrase is the ONLY secret you provide; the token at
-# rest is age-encrypted.
+# Flow: install the minimal tools to decrypt+clone (git, age) -> obtain the clone
+# token -> clone the private repo -> hand off to the repo's own deploy.sh (which
+# does the real host/stack provisioning).
 #
-# The token blob below is produced by scripts/deploy/encrypt_repo_token.sh — run that,
-# then paste its output between the AGE markers. Nothing else needs editing.
+# The token is obtained by the first of three routes that can supply one:
+#   1. this device's own age identity, if it has been provisioned before;
+#   2. a token handed over for this run in SCANBOX_REPO_TOKEN_FILE;
+#   3. the published blob plus the operator's passphrase.
+# Only the third is interactive, and only on a first provision.
+#
+# Rotating a token changes token.age and nothing in this file. That is the point:
+# the blob used to be pasted into this script AND into bootstrap_win.ps1, and two
+# copies of one artefact kept in step by a guard is a drift waiting for the day
+# somebody forgets to extend the guard.
 # =============================================================================
 set -euo pipefail
 
@@ -127,7 +134,7 @@ fi
 # Already-provisioned devices hold their own age identity with the token sealed
 # inside (J5): read it and skip the passphrase entirely — this is what makes
 # unattended/cron updates possible. Only a first provision (or a device whose
-# identity is gone) falls back to the embedded blob + the operator passphrase.
+# identity is gone) falls back to the published blob + the operator passphrase.
 DEVICE_KEY="/etc/scanbox/device-key.txt"
 DEVICE_ENV="${DEPLOY_DIR}/.env.age"
 TOKEN=""
@@ -143,7 +150,7 @@ fi
 # It exists for one caller: scripts/deploy/bootstrap_win.ps1, which has already opened
 # the blob on the PC because the operator typed the passphrase there. Without
 # this branch the only way to get a first provision unattended is to put the
-# MASTER PASSPHRASE on the card - and the embedded blob is public, so a card
+# MASTER PASSPHRASE on the card - and the published blob is public, so a card
 # carrying the passphrase carries every token that blob will ever hold, for
 # every node, unrevocably. A card carrying this token carries one read-only,
 # single-repo, revocable credential instead.

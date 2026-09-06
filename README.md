@@ -30,8 +30,9 @@ provisions the host (kernel headers, USB-gadget services, the patched
 `usb_f_uvc` kernel module), builds and launches the container stack, and writes
 `VERSION`.
 
-The embedded clone token is `age`-encrypted and **read-only, scoped to one
-repo** — the passphrase is the only secret you carry.
+The clone token is `age`-encrypted and **read-only, scoped to one repo**. It is
+not embedded in either script: both fetch it from `token.age`, served next to
+them, and the passphrase that opens it is the only secret you carry.
 
 ## First provision: one reboot, handled for you
 
@@ -114,7 +115,9 @@ clone itself never happened (no network, wrong passphrase), the log lands at
 | `SCANBOX_REPO_BRANCH` | `uvc-webcam-beta` | branch to deploy; falls back to the remote default (with a warning) if it is gone |
 | `SCANBOX_DEPLOY_DIR` | `$HOME/scanbox` | where to clone |
 | `SCANBOX_NO_REBOOT` | — | if set, never reboot automatically; print the instruction instead |
-| `SCANBOX_PASSPHRASE_HINT` | *(baked in)* | override the printed hint |
+| `SCANBOX_PASSPHRASE_HINT` | *(fetched from `token.age.hint`)* | override the printed hint |
+| `SCANBOX_DEPLOY_BASE_URL` | *(this repo, `main`)* | where to fetch `token.age` and its hint from |
+| `SCANBOX_REPO_TOKEN_FILE` | — | a file holding a clone token to use instead of the passphrase; it is read, shredded, and the shredding is reported |
 
 > Env vars go on the `bash` side of the pipe, not before `curl`. In
 > `VAR=x curl … | bash`, `VAR` is set for `curl` and never reaches the script.
@@ -122,14 +125,16 @@ clone itself never happened (no network, wrong passphrase), the log lands at
 
 ## Updating this repo
 
-All three files here are **published copies** — the sources live in the private
-repo (`scripts/deploy/bootstrap_node.sh`, `scripts/deploy/bootstrap_win.ps1` and
-`scripts/deploy/README_DEPLOY.md`), and `scripts/deploy/publish_bootstrap.sh`
-there is the only sanctioned way to publish them (token rotation included).
+The two scripts and this README are **published copies** — the sources live in
+the private repo (`scripts/deploy/bootstrap_node.sh`,
+`scripts/deploy/bootstrap_win.ps1` and `scripts/deploy/README_DEPLOY.md`), and
+`scripts/deploy/publish_bootstrap.sh` there is the only sanctioned way to publish
+them (token rotation included).
 
-`bootstrap_node.sh` and `bootstrap_win.ps1` are published **together, in one commit**,
-because they carry one token between them: the publisher patches both blobs in a
-single rotation and refuses to push if they disagree. Never hand-edit the copies
-here — a drift test in the private repo diffs served against source, and also
-checks that the two served files still carry the same token and print the same
-hint.
+`token.age` and `token.age.hint` are **artefacts, not copies**: nothing in the
+private repo holds the blob, and a rotation replaces those two files and touches
+no script. Both halves fetch them, so there is no longer a pair to keep in step —
+the guard that used to compare two embedded blobs is gone because there is
+nothing to compare. Never hand-edit anything here: a drift test in the private
+repo diffs served against source, and checks that neither served script has
+regrown an embedded blob.
