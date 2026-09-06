@@ -522,7 +522,7 @@ function Get-AuthorizedKeys {
 
 # Open the blob HERE and put the TOKEN on the card, not the passphrase.
 #
-# WHY, and it is not about how either one works. The blob inside bootstrap_node.sh is
+# WHY, and it is not about how either one works. The blob bootstrap_node.sh fetches is
 # published on purpose - it is the whole point of a public entry point. So a
 # card carrying the master passphrase carries every token that blob will ever
 # hold, for every node, and revoking it means rotating everything. A card
@@ -975,11 +975,26 @@ function Invoke-Rpiboot {
         $out  = & $RPIBOOT_EXE -v -m 1000000 -d $RPIBOOT_GADGET 2>&1
         $code = $LASTEXITCODE
         if ($out) { $out | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
-        if ($code -eq 0) {
+        # EXIT 0 IS NOT SUCCESS HERE, and believing it cost a whole run.
+        # Measured 2026-09-06: rpiboot printed "Failed control transfer" and
+        # "Failed to write complete file to USB device" while sending boot.img,
+        # and STILL exited 0. The gadget never loaded, so the mass-storage wait
+        # after this spent its full 180 s on a disk that could not appear, and
+        # then blamed the jumper - which was fitted, and correct. Same shape as
+        # the defect this function was written for: trusting the code over the
+        # output. The success line is the evidence; the exit code is a hint.
+        $said_done = ($out -join "`n") -match 'Second stage boot server done'
+        $said_fail = ($out -join "`n") -match 'Failed to write complete file|Failed control transfer'
+        if ($code -eq 0 -and $said_done -and -not $said_fail) {
             Write-Ok "rpiboot completed the second stage (attempt $i)."
             return
         }
-        Write-Warn2 "rpiboot exited $code on attempt $i."
+        if ($code -eq 0) {
+            Write-Warn2 ("rpiboot exited 0 on attempt $i but did not say it finished" +
+                         $(if ($said_fail) { " - it reported a failed transfer" } else { "" }) + ".")
+        } else {
+            Write-Warn2 "rpiboot exited $code on attempt $i."
+        }
         if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
     }
     throw ("rpiboot failed $Attempts times. Its last exit code is above. If it says " +
