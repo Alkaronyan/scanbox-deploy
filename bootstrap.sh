@@ -20,9 +20,12 @@
 set -euo pipefail
 
 REPO="${SCANBOX_REPO:-Alkaronyan/scanbox}"
-# During beta, deploy the beta branch; if it no longer exists (e.g. after it is
-# merged into main and deleted) the clone falls back to the remote's default
-# branch with a warning. Flip this to "main" once beta is promoted.
+# During beta, deploy the beta branch. If it no longer exists (e.g. after it is
+# merged away and deleted), the resolver below follows the code to the branch it
+# now LIVES in — the nearest branch containing this node's commit — never to the
+# remote's default branch, which is the fallback that stranded both benches on
+# 2026-08-07 (J16). See the reasoning at the resolver itself.
+# J7's promotion owns flipping this default to "main".
 BRANCH="${SCANBOX_REPO_BRANCH:-uvc-webcam-beta}"
 DEPLOY_DIR="${SCANBOX_DEPLOY_DIR:-${HOME}/scanbox}"
 
@@ -47,6 +50,46 @@ AGE
 # SCANBOX_PASSPHRASE_HINT.
 PASSPHRASE_HINT="${SCANBOX_PASSPHRASE_HINT:-Old naming}"
 
+# ---- one elapsed clock for the WHOLE cold deploy ----------------------------
+# deploy.sh stamps its lines; this script did not, and the untimed span is the
+# expensive one: on a bare node the bootstrap installs git, age and the whole of
+# Docker, and clones the repo, all before deploy.sh exists. "Where did the time
+# go" was unanswerable for precisely the part that takes longest.
+#
+# The zero is EXPORTED, not kept, so deploy.sh continues this count instead of
+# restarting at 0 across the exec handoff. It is an epoch rather than bash's
+# SECONDS because SECONDS is per-process and cannot survive that handoff. Both
+# scripts then report elapsed time for the RUN - the thing being measured -
+# and neither reports it for itself.
+SCANBOX_DEPLOY_T0_EPOCH="${SCANBOX_DEPLOY_T0_EPOCH:-$(date +%s)}"
+export SCANBOX_DEPLOY_T0_EPOCH
+# ---- one stamp on EVERY line, applied where all output already passes -------
+# Stamping each script's own log() reached only the lines those scripts print
+# themselves - the [1/7]..[7/7] progress. Everything that actually takes the
+# time is printed by somebody else: setup_host.sh's own echoes, apt, and the
+# docker builds. Watching a real cold deploy, section 5 scrolls for minutes
+# without a single stamp, which is exactly the stretch you want to measure.
+#
+# So the stamp goes on the OUTERMOST pipeline instead, where every line from
+# every child already flows. One place, whole run, nothing to remember when a
+# new script is added. The per-script log()s keep their [bootstrap]/[deploy]
+# identity and deliberately carry no time of their own - two stamps on one line
+# is worse than none.
+#
+# printf's %(...)T and EPOCHSECONDS are bash builtins: a `date` fork per line
+# would cost thousands of forks on a Pi and time the stamper instead of the
+# deploy. TZ is set inside the subshell so the clock is UTC without touching
+# the caller's environment.
+_sb_stamp() {
+    (
+      export TZ=UTC
+      local t0="${SCANBOX_DEPLOY_T0_EPOCH:-${EPOCHSECONDS:-0}}" line
+      while IFS= read -r line || [ -n "${line}" ]; do
+          printf '[%(%H:%M:%S)T +%4ds] %s\n' -1 "$(( ${EPOCHSECONDS:-0} - t0 ))" "${line}"
+      done
+    )
+}
+
 log() { printf '\033[36m[bootstrap]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[bootstrap] %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -59,7 +102,12 @@ die() { printf '\033[31m[bootstrap] %s\033[0m\n' "$*" >&2; exit 1; }
 # <checkout>/deploy.log at the end. The passphrase is unaffected: age reads and
 # echoes it on /dev/tty, never through this pipe.
 SCANBOX_LOG_TMP="$(mktemp /tmp/scanbox-deploy.XXXXXX.log)"
-exec > >(tee -a "${SCANBOX_LOG_TMP}") 2>&1
+exec > >(_sb_stamp | tee -a "${SCANBOX_LOG_TMP}") 2>&1
+# Tell deploy.sh the stream it inherits is already stamped, so it does not stamp
+# it a second time - and, more importantly, so it DOES stamp when an older
+# published copy of this file handed it an unstamped one.
+SCANBOX_LOG_STAMPED=1
+export SCANBOX_LOG_STAMPED
 export SCANBOX_LOG_TMP
 
 case "${REPO_TOKEN_AGE}" in
@@ -91,6 +139,49 @@ if sudo test -r "${DEVICE_KEY}" 2>/dev/null && [ -f "${DEVICE_ENV}" ]; then
            | sed -n 's/^SCANBOX_REPO_TOKEN=//p' | head -1)" || true
   [ -n "${TOKEN}" ] || log "no sealed token in this device's secrets — falling back to the passphrase."
 fi
+# A token HANDED OVER for this run, ahead of the passphrase and behind the
+# device's own identity.
+#
+# It exists for one caller: scripts/deploy/flash.ps1, which has already opened
+# the blob on the PC because the operator typed the passphrase there. Without
+# this branch the only way to get a first provision unattended is to put the
+# MASTER PASSPHRASE on the card - and the embedded blob is public, so a card
+# carrying the passphrase carries every token that blob will ever hold, for
+# every node, unrevocably. A card carrying this token carries one read-only,
+# single-repo, revocable credential instead.
+#
+# It is NOT the same mechanism as the device-identity branch above and does not
+# pretend to be: that one is a secret BOUND to a machine, sitting root-only on
+# its disk, which has never travelled. This one travels. What changes is what
+# is lost when it is lost, not whether anything is.
+#
+# The token arrives in a FILE and not in the environment or an argument: /proc
+# publishes both to every user on the box, and this file is the caller's to
+# create with the permissions it wants and to destroy when we are done. We read
+# it, we shred it, and we say which of the two happened - never leaving the
+# caller to assume the destruction from our silence.
+#
+# Backwards compatible by construction: with SCANBOX_REPO_TOKEN_FILE unset,
+# every path below is exactly what it was.
+if [ -z "${TOKEN}" ] && [ -n "${SCANBOX_REPO_TOKEN_FILE:-}" ]; then
+  if [ -r "${SCANBOX_REPO_TOKEN_FILE}" ]; then
+    TOKEN="$(head -n 1 "${SCANBOX_REPO_TOKEN_FILE}" | tr -d '\r\n')"
+    shred -u -z "${SCANBOX_REPO_TOKEN_FILE}" 2>/dev/null || rm -f "${SCANBOX_REPO_TOKEN_FILE}"
+    if [ -e "${SCANBOX_REPO_TOKEN_FILE}" ]; then
+      log "WARNING: ${SCANBOX_REPO_TOKEN_FILE} still exists after shred - REMOVE IT BY HAND."
+    fi
+    if [ -n "${TOKEN}" ]; then
+      log "clone token handed over by the caller (no passphrase needed); the file is gone."
+    else
+      log "the handed-over token file was EMPTY - falling back to the passphrase."
+    fi
+  else
+    # Named but unreadable is not the same as not named, and the difference
+    # decides whether a prompt on a headless node is a bug or the design.
+    log "SCANBOX_REPO_TOKEN_FILE is set to ${SCANBOX_REPO_TOKEN_FILE} but it cannot be read - falling back to the passphrase."
+  fi
+fi
+
 if [ -z "${TOKEN}" ]; then
   log "decrypting the deploy token."
   printf '\033[36m[bootstrap]\033[0m \033[33mpassphrase hint:\033[0m %s\n' "${PASSPHRASE_HINT}"

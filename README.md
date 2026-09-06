@@ -2,8 +2,14 @@
 # scanbox-deploy
 
 Public deploy entry point for the **private** [`Alkaronyan/scanbox`](https://github.com/Alkaronyan/scanbox)
-subsystem. This repo holds `bootstrap.sh` — anyone with the deploy passphrase
-can run it to provision a device — and this README, the operator's guide.
+subsystem. This repo holds the two halves of provisioning — `bootstrap.sh`,
+which runs **on the device**, and `flash.ps1`, which runs **on a Windows PC** and
+produces a device that runs `bootstrap.sh` by itself — plus this README, the
+operator's guide.
+
+Both carry the same encrypted, read-only clone token. Anyone with the deploy
+passphrase can provision a device; nobody without it can do anything with either
+file.
 
 ## Provision or update a device (one command)
 
@@ -38,6 +44,48 @@ under you.
 
 The gadget assembles and binds itself on the way back up. **Nothing needs to be
 re-run.**
+
+## A bare board, from nothing: `flash.ps1`
+
+Everything above assumes a device that already boots and is on the network.
+`flash.ps1` is for the case before that — a Compute Module with a blank eMMC.
+Run it on a Windows PC with the module attached over USB:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File flash.ps1
+```
+
+It presents a numbered menu; option 1 is the whole path. It writes the pinned
+Raspberry Pi OS image, then writes a cloud-init seed that gives the board its
+name, clock, account, keys and passwordless sudo, and finally has the board
+fetch and run the `bootstrap.sh` above on its own.
+
+**You are asked for one thing and asked to do two:**
+
+| | |
+|---|---|
+| type | the deploy passphrase, once |
+| do | fit the nRPIBOOT jumper before, remove it after |
+
+Nothing else. The account password and your SSH keys are reused from Raspberry
+Pi Imager's own stored settings, so they are not asked for either — and the
+password is only ever handled as a hash, never as a plaintext, on the PC or on
+the card.
+
+The passphrase reaches the card as one file and the board **destroys it in the
+first seconds of first boot**, before the network is even up. If you would
+rather it never touched the card, `-NoPassphrase` leaves it out: the board still
+comes up provisioned and reachable, and prints the one command to finish it over
+SSH.
+
+Requirements on the PC: Windows PowerShell 5.1, Git for Windows (for `openssl`),
+Raspberry Pi Imager, and `age`. `flash.ps1 -Action probe` reports which of those
+are present without changing anything, and `-Action cleanup` removes only what
+the script itself installed — recorded when it installs, never guessed at
+afterwards.
+
+Its own log for a run is on the device at `/var/log/scanbox-provision.log`, and
+the deploy's log follows at `~/scanbox/deploy.log`.
 
 ## Verify it worked
 
@@ -74,8 +122,14 @@ clone itself never happened (no network, wrong passphrase), the log lands at
 
 ## Updating this repo
 
-Both files here are **published copies** — the sources live in the private
-repo (`scripts/deploy/bootstrap.sh` and `scripts/deploy/README_DEPLOY.md`),
-and `scripts/deploy/publish_bootstrap.sh` there is the only sanctioned way to
-publish them (token rotation included). Never hand-edit the copies here: a
-drift test in the private repo diffs served against source and will flag it.
+All three files here are **published copies** — the sources live in the private
+repo (`scripts/deploy/bootstrap.sh`, `scripts/deploy/flash.ps1` and
+`scripts/deploy/README_DEPLOY.md`), and `scripts/deploy/publish_bootstrap.sh`
+there is the only sanctioned way to publish them (token rotation included).
+
+`bootstrap.sh` and `flash.ps1` are published **together, in one commit**,
+because they carry one token between them: the publisher patches both blobs in a
+single rotation and refuses to push if they disagree. Never hand-edit the copies
+here — a drift test in the private repo diffs served against source, and also
+checks that the two served files still carry the same token and print the same
+hint.
