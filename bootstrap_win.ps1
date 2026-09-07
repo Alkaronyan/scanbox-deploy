@@ -90,11 +90,26 @@ param(
     [string] $RepoRoot,
 
     # Print what would happen; touch no disk, install nothing.
-    [switch] $DryRun
+    [switch] $DryRun,
+
+    # Set by Assert-Elevated on the copy it starts under UAC. It means "this
+    # window was opened by the script itself", and it buys two things the first
+    # window does not need: the transcript names itself a relaunch, and the
+    # window WAITS for a keypress before closing. Without that wait an elevated
+    # failure is unreadable - the window carries the only copy of the error and
+    # closes with it. Not for hand use.
+    [switch] $Relaunched
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# The arguments this script was actually given, captured AT SCRIPT SCOPE.
+# $PSBoundParameters inside a function is that FUNCTION's bound parameters, not
+# the script's: read from inside parameterless Assert-Elevated it is empty, so
+# the relaunch forwarded nothing at all - not -Serial, not -Image, not
+# -NoPassphrase. Captured here, it is the script's own.
+$INVOKED_PARAMS = $PSBoundParameters
 
 # =============================================================================
 # Constants
@@ -121,6 +136,9 @@ $HINT_URL        = "$DEPLOY_BASE_URL/token.age.hint"
 $REPO_BRANCH   = 'uvc-webcam-beta'
 $REPO_URL      = 'https://github.com/Alkaronyan/scanbox.git'
 $BOOTSTRAP_URL = "$DEPLOY_BASE_URL/bootstrap_node.sh"
+# Where this file itself is served. Only used to tell an operator who piped it
+# into Invoke-Expression how to run it properly - see Assert-Elevated.
+$BOOTSTRAP_WIN_URL = "$DEPLOY_BASE_URL/bootstrap_win.ps1"
 
 # The pinned OS image: Debian 13 (trixie) 64-bit Lite, Raspberry Pi build.
 # IMAGE_RAW_SHA256 is the hash of the DECOMPRESSED .img - it is the value
@@ -149,6 +167,33 @@ $RPIBOOT_DIR    = 'C:\Program Files (x86)\Raspberry Pi'
 $RPIBOOT_EXE    = Join-Path $RPIBOOT_DIR 'rpiboot.exe'
 $RPIBOOT_GADGET = Join-Path $RPIBOOT_DIR 'mass-storage-gadget64'
 $RPIBOOT_URL    = 'https://github.com/raspberrypi/usbboot/releases/latest/download/rpiboot_setup.exe'
+
+# ---- the three the script used to refuse on ---------------------------------
+# It installed rpiboot and then threw at `age`, Git and Imager with a winget
+# line for the operator to run. That makes "one command from a bare PC" false:
+# the two it needs FIRST - age to decrypt the clone token, git to fetch the
+# three directories it reads - are exactly the two a machine with no checkout
+# does not have. Same pattern as rpiboot now, with the same manifest discipline:
+# whatever pre-existed is recorded as such and cleanup never touches it.
+#
+# VERSION AND HASH ARE PINNED, like the OS image, not `latest`. A moving URL
+# would install something nobody checked, and the day it moved the run would
+# differ from every run before it with nothing saying so. Updating a pin is a
+# commit; that is the point. Hashes measured 2026-09-07 by downloading each once.
+$DEP_DIR = Join-Path $STATE_DIR 'bin'
+
+$AGE_VERSION = 'v1.3.2'
+$AGE_URL     = "https://github.com/FiloSottile/age/releases/download/$AGE_VERSION/age-$AGE_VERSION-windows-amd64.zip"
+$AGE_SHA256  = 'f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7'
+$AGE_EXE     = Join-Path $DEP_DIR 'age.exe'
+
+$GIT_VERSION = '2.55.0.5'
+$GIT_URL     = 'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe'
+$GIT_SHA256  = 'd065a4e23c3d9a6b5073d609b5be0830227ec3ca053c083ba385061ddfaf94c6'
+
+$IMAGER_VERSION = '2.0.11.1'
+$IMAGER_URL     = "https://downloads.raspberrypi.org/imager/imager_$IMAGER_VERSION.exe"
+$IMAGER_SHA256  = '94ffded522f3e2a38bdb9505440229e1411b80992a616ba16b2d7e73bd794130'
 
 $IMAGER_DIR = 'C:\Program Files\Raspberry Pi Ltd\Imager'
 $IMAGER_EXE = Join-Path $IMAGER_DIR 'rpi-imager.exe'
@@ -195,19 +240,59 @@ function Test-Elevated {
 # drive needs it regardless. Rather than failing at the moment of the write -
 # after the operator has already moved the jumper and waited - the script asks
 # for elevation up front and relaunches itself, forwarding the arguments it was
-# given.
+# given AND the action it was about to run.
+#
+# THE ACTION HAS TO BE FORWARDED EXPLICITLY, and this is what made an elevated
+# run land back on the menu. Chosen from the menu, -Action is never bound: it
+# keeps its default 'menu', so it is absent from the invocation and the elevated
+# copy has nothing to tell it what the operator picked. It re-drew the menu, the
+# operator chose again, and only that second choice ran. Each caller now names
+# the action its own window would have run.
 function Assert-Elevated {
+    param(
+        # The -Action the elevated copy must run instead of re-asking. Named by
+        # the caller, because only the caller knows what it is doing when the
+        # choice came from the menu rather than the command line.
+        [Parameter(Mandatory)]
+        [ValidateSet('flash', 'render', 'probe', 'cleanup')]
+        [string] $ResumeAction
+    )
     if (Test-Elevated) { return }
-    if ($DryRun) { Write-Warn2 'not elevated; a real run would relaunch itself as Administrator here.'; return }
-    Write-Step 'This step needs Administrator. Relaunching (accept the UAC prompt).'
+
+    # `irm <url> | iex` is the shape everyone reaches for, and it CANNOT work
+    # here: run that way the script has no file on disk, $PSCommandPath is empty
+    # (measured), and there is nothing for the elevated copy to re-invoke. It
+    # used to fail inside Start-Process, after the UAC prompt, with the reason
+    # invisible. Say it here instead, and say what to do.
+    if (-not $PSCommandPath) {
+        throw ("This script must be run FROM A FILE, not piped into Invoke-Expression: " +
+               "elevation re-invokes it by path and there is no path. Download it first, " +
+               "then run it:`n" +
+               "    irm $BOOTSTRAP_WIN_URL -OutFile `$env:TEMP\bootstrap_win.ps1; " +
+               "powershell -NoProfile -ExecutionPolicy Bypass -File `$env:TEMP\bootstrap_win.ps1")
+    }
+
+    # Built before the DryRun test, not after, so that -DryRun PRINTS the exact
+    # command line it would launch. The forwarding is the part that was broken;
+    # a rehearsal that cannot show it is no rehearsal.
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-    foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+    foreach ($kv in $INVOKED_PARAMS.GetEnumerator()) {
+        if ($kv.Key -eq 'Action') { continue }   # replaced by -ResumeAction below
         if ($kv.Value -is [switch]) {
             if ($kv.Value.IsPresent) { $argList += "-$($kv.Key)" }
         } else {
             $argList += @("-$($kv.Key)", "`"$($kv.Value)`"")
         }
     }
+    $argList += @('-Action', $ResumeAction, '-Relaunched')
+
+    if ($DryRun) {
+        Write-Warn2 'not elevated; a real run would relaunch itself as Administrator here, as:'
+        Write-Host "      powershell.exe $($argList -join ' ')"
+        return
+    }
+    Write-Step "This step needs Administrator. Relaunching as '$ResumeAction' (accept the UAC prompt)."
+    Write-Host "  powershell.exe $($argList -join ' ')"
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
     exit 0
 }
@@ -236,6 +321,12 @@ function Read-Manifest {
 
 function Write-Manifest {
     param($Manifest)
+    # -DryRun says "touch no disk, install nothing", and the manifest is disk.
+    # Writing it anyway also made the rehearsal impossible to run at all: the
+    # file belongs to whichever elevated run created it, so an unelevated
+    # -DryRun died on "Access to the path ... is denied" before it could show
+    # anything. A dry run has to be the cheapest thing in the script to run.
+    if ($DryRun) { Write-Host "  (dry run) would record the manifest at $MANIFEST_PATH"; return }
     if (-not (Test-Path $STATE_DIR)) { New-Item -ItemType Directory -Force -Path $STATE_DIR | Out-Null }
     ($Manifest | ConvertTo-Json -Depth 6) | Out-File -FilePath $MANIFEST_PATH -Encoding utf8 -Force
 }
@@ -332,13 +423,124 @@ function Get-PublishedHint {
 function Get-AgePath {
     $cmd = Get-Command age.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+    # The copy this script keeps for itself, which is never on PATH.
+    if (Test-Path $AGE_EXE) { return $AGE_EXE }
     return $null
 }
 
 function Get-GitPath {
     $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+    # A Git installed in this same session is not on this process' PATH: the
+    # installer sets the machine PATH and only new processes inherit it.
+    foreach ($c in @('C:\Program Files\Git\cmd\git.exe', 'C:\Program Files (x86)\Git\cmd\git.exe')) {
+        if (Test-Path $c) { return $c }
+    }
     return $null
+}
+
+# =============================================================================
+# Installing what the script needs, rather than refusing
+#
+# Each one: probe, record whether it pre-existed, download to the cache, verify
+# the pinned sha256, install. Verifying before running is not ceremony - these
+# are executables fetched over the network and run with the elevation this
+# script already holds.
+# =============================================================================
+
+function Get-PinnedDownload {
+    param(
+        [Parameter(Mandatory)] [string] $Url,
+        [Parameter(Mandatory)] [string] $Sha256,
+        [Parameter(Mandatory)] [string] $FileName
+    )
+    if (-not (Test-Path $DEP_DIR)) { New-Item -ItemType Directory -Force -Path $DEP_DIR | Out-Null }
+    $path = Join-Path $DEP_DIR $FileName
+    if (Test-Path $path) {
+        $h = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
+        if ($h -eq $Sha256) { Write-Ok "cached $FileName sha256 matches the pin."; return $path }
+        Write-Warn2 "cached $FileName does not match the pin - re-downloading."
+        Remove-Item -Force $path
+    }
+    Write-Step "Downloading $FileName"
+    Write-Host "  $Url"
+    $prev = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+    try { Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing }
+    finally { $ProgressPreference = $prev }
+    $h = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
+    if ($h -ne $Sha256) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $path
+        throw "$FileName sha256 $h does not match the pinned $Sha256. Refusing to run it."
+    }
+    Write-Ok "$FileName downloaded and verified against the pin."
+    return $path
+}
+
+# age ships as a zip with no installer, so it stays in this script's own
+# directory and never reaches PATH. Cleanup can delete it without touching
+# anything the operator installed for themselves.
+function Install-Age {
+    $pre = [bool] (Get-Command age.exe -ErrorAction SilentlyContinue)
+    Register-Install -Component 'age' -PreExisted $pre -Path $AGE_EXE `
+        -Note "age $AGE_VERSION, extracted to this script's own bin; never added to PATH."
+    if ($pre)                 { Write-Ok 'age already on PATH - not installing, and cleanup will not remove it.'; return }
+    if (Test-Path $AGE_EXE)   { Write-Ok "age already at $AGE_EXE."; return }
+    if ($DryRun)              { Write-Host "  (dry run) would download and extract $AGE_URL"; return }
+    $zip = Get-PinnedDownload -Url $AGE_URL -Sha256 $AGE_SHA256 -FileName "age-$AGE_VERSION-windows-amd64.zip"
+    $tmp = Join-Path $DEP_DIR ('unzip_' + [guid]::NewGuid().ToString('N'))
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
+        $src = Get-ChildItem -Path $tmp -Filter 'age.exe' -Recurse | Select-Object -First 1
+        if (-not $src) { throw "no age.exe inside $zip" }
+        Copy-Item -Path $src.FullName -Destination $AGE_EXE -Force
+    } finally { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp }
+    if (-not (Test-Path $AGE_EXE)) { throw "age.exe is still not at $AGE_EXE after extracting." }
+    Write-Ok "age $AGE_VERSION installed at $AGE_EXE."
+}
+
+# Git for Windows is a system-wide install and the biggest of the three (62 MB).
+# It is here because a PC with no checkout needs `git` to fetch one, and because
+# `openssl` - which turns the account password into a crypt hash - ships inside
+# it. Silent, no restart, no desktop or shell integration.
+function Install-Git {
+    $pre = [bool] (Get-GitPath)
+    Register-Install -Component 'git' -PreExisted $pre -Path 'C:\Program Files\Git' `
+        -Note "Git for Windows $GIT_VERSION, silent install; supplies git.exe and openssl.exe."
+    if ($pre)    { Write-Ok 'Git already present - not installing, and cleanup will not remove it.'; return }
+    if ($DryRun) { Write-Host "  (dry run) would download and silently install $GIT_URL"; return }
+    $exe = Get-PinnedDownload -Url $GIT_URL -Sha256 $GIT_SHA256 -FileName "Git-$GIT_VERSION-64-bit.exe"
+    Write-Step "Installing Git for Windows $GIT_VERSION (silent)."
+    Invoke-Shown $exe @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/SUPPRESSMSGBOXES',
+                        '/COMPONENTS=gitlfs', '/o:PathOption=Cmd') -AllowFail | Out-Null
+    if (-not (Get-GitPath)) { throw 'Git is still not present after the installer ran.' }
+    Write-Ok "Git for Windows $GIT_VERSION installed."
+}
+
+# Imager writes and verifies the card, and it also SHIPS THE WINUSB DRIVER that
+# lets rpiboot talk to a board in bootloader mode - so installing it is what
+# makes Install-WinUsbDriver find a driver instead of asking the operator to
+# add one from Device Manager.
+function Install-Imager {
+    $pre = Test-Path $IMAGER_EXE
+    Register-Install -Component 'imager' -PreExisted $pre -Path $IMAGER_DIR `
+        -Note "Raspberry Pi Imager $IMAGER_VERSION, silent install; also supplies rpiboot-winusb.inf."
+    if ($pre)    { Write-Ok 'Raspberry Pi Imager already present - not installing, and cleanup will not remove it.'; return }
+    if ($DryRun) { Write-Host "  (dry run) would download and silently install $IMAGER_URL"; return }
+    $exe = Get-PinnedDownload -Url $IMAGER_URL -Sha256 $IMAGER_SHA256 -FileName "imager_$IMAGER_VERSION.exe"
+    Write-Step "Installing Raspberry Pi Imager $IMAGER_VERSION (silent)."
+    Invoke-Shown $exe @('/quiet', '/norestart') -AllowFail | Out-Null
+    if (-not (Test-Path $IMAGER_EXE)) { throw "Raspberry Pi Imager is still not at $IMAGER_EXE after the installer ran." }
+    Write-Ok "Raspberry Pi Imager $IMAGER_VERSION installed."
+}
+
+# The three, in the order the script needs them: age and git BEFORE anything
+# tries to read a checkout or decrypt a token, Imager before the write.
+function Install-Dependencies {
+    Write-Step 'Dependencies: installing whatever this PC is missing.'
+    Install-Age
+    Install-Git
+    Install-Imager
 }
 
 # =============================================================================
@@ -547,8 +749,9 @@ function Get-DeployToken {
     $age = Get-AgePath
     if (-not $age) {
         throw ('age.exe not found, and it is what turns the passphrase into the token that ' +
-               'goes on the card. Install it (winget install FiloSottile.age), or use ' +
-               '-NoPassphrase to write a card with no credential at all and run bootstrap by hand.')
+               'goes on the card. Install-Age should have put it there, so reaching this ' +
+               'means the install failed or was skipped - re-run, or use -NoPassphrase to ' +
+               'write a card with no credential at all and run bootstrap by hand.')
     }
     $blob = Join-Path $env:TEMP ('sbxblob_' + [guid]::NewGuid().ToString('N') + '.age')
     [IO.File]::WriteAllText($blob, (Get-PublishedBlob), (New-Object Text.UTF8Encoding($false)))
@@ -602,7 +805,7 @@ function Get-SparseCheckout {
     $git = Get-GitPath
     if (-not $git) { throw 'git.exe not found. Install Git for Windows.' }
     $age = Get-AgePath
-    if (-not $age) { throw 'age.exe not found, and it is needed to decrypt the clone token. Install it (winget install FiloSottile.age).' }
+    if (-not $age) { throw 'age.exe not found, and it is needed to decrypt the clone token. Install-Age should have provided it; re-run -Action flash, which installs dependencies first.' }
 
     Write-Step 'No local checkout - fetching the three directories this script reads.'
     $blob = Join-Path $env:TEMP ('sbxblob_' + [guid]::NewGuid().ToString('N') + '.age')
@@ -1199,7 +1402,7 @@ function Get-PinnedImage {
 function Write-CardImage {
     param([string] $ImagePath, $Disk)
     if (-not (Test-Imager)) {
-        throw "Raspberry Pi Imager is not installed at $IMAGER_EXE. Install it (winget install RaspberryPiFoundation.RaspberryPiImager)."
+        throw "Raspberry Pi Imager is not installed at $IMAGER_EXE. Install-Imager should have provided it; re-run -Action flash, which installs dependencies first."
     }
     $target = [string] $Disk.DeviceID    # \\.\PHYSICALDRIVEn
 
@@ -1411,6 +1614,35 @@ function Invoke-Cleanup {
             'winusb-driver' {
                 Write-Warn2 "$($e.component): this script never installs a driver, so there is nothing to undo."
             }
+            'age' {
+                # A file in this script's own directory: removing it takes
+                # nothing else with it and touches no PATH.
+                if ($DryRun) { Write-Host "  (dry run) would delete $AGE_EXE" }
+                elseif (Test-Path $AGE_EXE) { Remove-Item -Force $AGE_EXE; Write-Ok "deleted $AGE_EXE" }
+                else { Write-Ok 'age was already gone.' }
+            }
+            'git' {
+                $unins = 'C:\Program Files\Git\unins000.exe'
+                if (Test-Path $unins) {
+                    if ($DryRun) { Write-Host "  (dry run) would run $unins /VERYSILENT" }
+                    else { Invoke-Shown $unins @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -AllowFail | Out-Null }
+                } else {
+                    Write-Warn2 "no uninstaller at $unins - remove Git for Windows from Settings by hand."
+                }
+            }
+            'imager' {
+                # Imager also owns the WinUSB driver rpiboot needs. Removing it
+                # takes that with it, which is correct when this script put it
+                # there and nobody else was using it - and it is why the driver
+                # entry is recorded separately as pre-existing whenever Imager was.
+                $unins = Join-Path $IMAGER_DIR 'Uninstall.exe'
+                if (Test-Path $unins) {
+                    if ($DryRun) { Write-Host "  (dry run) would run $unins /quiet" }
+                    else { Invoke-Shown $unins @('/quiet', '/norestart') -AllowFail | Out-Null }
+                } else {
+                    Write-Warn2 "no uninstaller at $unins - remove Raspberry Pi Imager from Settings by hand."
+                }
+            }
             default {
                 Write-Warn2 "$($e.component): no removal step is defined for this component."
             }
@@ -1427,7 +1659,24 @@ function Invoke-Cleanup {
         Write-Ok 'rpiboot is gone (probed, not assumed).'
     }
     Write-Host ''
-    Write-Ok "Raspberry Pi Imager present: $img - never touched by this script."
+    $entryImg = Get-ManifestEntry 'imager'
+    if ($entryImg -and -not $entryImg.preExisted -and $img) {
+        Write-Bad 'Raspberry Pi Imager is STILL present although this script installed it - remove it by hand.'
+    } elseif ($entryImg -and -not $entryImg.preExisted) {
+        Write-Ok 'Raspberry Pi Imager is gone (probed, not assumed).'
+    } else {
+        Write-Ok "Raspberry Pi Imager present: $img - it pre-existed this script, so it was left alone."
+    }
+    $entryAge = Get-ManifestEntry 'age'
+    if ($entryAge -and -not $entryAge.preExisted) {
+        if (Test-Path $AGE_EXE) { Write-Bad "age is STILL at $AGE_EXE - remove it by hand." }
+        else { Write-Ok 'age is gone (probed, not assumed).' }
+    }
+    $entryGit = Get-ManifestEntry 'git'
+    if ($entryGit -and -not $entryGit.preExisted) {
+        if (Get-GitPath) { Write-Bad 'Git is STILL present although this script installed it - remove it by hand.' }
+        else { Write-Ok 'Git is gone (probed, not assumed).' }
+    }
     Write-Host ''
     Write-Host 'Cached files this script created are left in place; they are data, not installs:'
     foreach ($p in @($IMAGE_DIR, $CLONE_DIR, $HASH_PATH, $KEYS_PATH)) {
@@ -1486,12 +1735,16 @@ function Invoke-Render {
 }
 
 function Invoke-Flash {
-    Assert-Elevated
+    Assert-Elevated -ResumeAction 'flash'
     Write-Step 'Full flash: bare eMMC to a node that deploys itself.'
     Write-Host ''
     Write-Host 'You will be asked for exactly one thing (the deploy passphrase) and asked to'
     Write-Host 'move the jumper twice. Everything else is automatic.'
     Write-Host ''
+
+    # Before Resolve-RepoRoot: on a PC with no checkout that call needs git and
+    # age, which are two of the three installed here.
+    Install-Dependencies
 
     $root = Resolve-RepoRoot
     if (-not (Test-KernelAllowlist -Root $root)) {
@@ -1601,10 +1854,55 @@ function Show-Menu {
 if (-not (Test-Path $STATE_DIR)) { New-Item -ItemType Directory -Force -Path $STATE_DIR | Out-Null }
 if ($DryRun) { Write-Warn2 'DRY RUN - nothing will be installed, downloaded or written.' }
 
-switch ($Action) {
-    'flash'   { Invoke-Flash }
-    'render'  { Invoke-Render }
-    'probe'   { Invoke-Probe }
-    'cleanup' { Invoke-Cleanup }
-    'menu'    { Show-Menu }
+# EVERY RUN LEAVES A TRANSCRIPT, and an elevated one WAITS before it closes.
+#
+# An elevated relaunch owns its own console window: when the script ends - or
+# throws - that window closes and takes the only copy of the output with it.
+# Reported from the field on 2026-09-07: "ha impreso alguna cosa y ha cerrado la
+# ventana", with nothing left to read afterwards. The imager log is no help,
+# because a failure before the write never reaches rpi-imager at all.
+#
+# So: a transcript per run under $STATE_DIR, started before anything can fail
+# and stopped in `finally`; the error printed in full rather than as one line;
+# and, in the window this script opened itself, a keypress before it closes.
+# Best-effort by design - a machine that refuses transcription still runs.
+$LOG_PATH = Join-Path $STATE_DIR ('bootstrap_win-' +
+    (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') +
+    $(if ($Relaunched) { '-elevated' } else { '' }) + '.log')
+$transcribing = $false
+try { Start-Transcript -Path $LOG_PATH -ErrorAction Stop | Out-Null; $transcribing = $true }
+catch { Write-Warn2 "could not start a transcript ($($_.Exception.Message)); continuing without one." }
+if ($transcribing) { Write-Host "  transcript: $LOG_PATH" }
+
+$failed = $false
+try {
+    switch ($Action) {
+        'flash'   { Invoke-Flash }
+        'render'  { Invoke-Render }
+        'probe'   { Invoke-Probe }
+        'cleanup' { Invoke-Cleanup }
+        'menu'    { Show-Menu }
+    }
 }
+catch {
+    $failed = $true
+    Write-Host ''
+    Write-Bad $_.Exception.Message
+    if ($_.InvocationInfo) { Write-Host "  at $($_.InvocationInfo.PositionMessage)" }
+    Write-Host ''
+    Write-Host ($_.ScriptStackTrace)
+}
+finally {
+    if ($transcribing) {
+        Write-Host ''
+        Write-Host "  transcript: $LOG_PATH"
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+    if ($Relaunched) {
+        Write-Host ''
+        Write-Host '  This window was opened by the script and will close when you press a key.' -ForegroundColor Cyan
+        if ($Host.UI.RawUI) { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') }
+        else { Read-Host '  press Enter to close' | Out-Null }
+    }
+}
+if ($failed) { exit 1 }

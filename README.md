@@ -50,10 +50,22 @@ re-run.**
 
 Everything above assumes a device that already boots and is on the network.
 `bootstrap_win.ps1` is for the case before that — a Compute Module with a blank eMMC.
-Run it on a Windows PC with the module attached over USB:
+One command on a Windows PC with the module attached over USB, on a machine
+with **nothing installed**:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap_win.ps1
+irm https://raw.githubusercontent.com/Alkaronyan/scanbox-deploy/main/bootstrap_win.ps1 -OutFile $env:TEMP\bootstrap_win.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\bootstrap_win.ps1
+```
+
+Two steps, not one, and the second is not decoration: the script must exist as a
+**file**. `irm ... | iex` cannot work — elevation re-invokes the script by path,
+and a script piped into `Invoke-Expression` has no path. It says so and stops,
+rather than failing inside the UAC prompt where nobody can see it.
+
+From a checkout, the same thing without the download:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy\bootstrap_win.ps1
 ```
 
 It presents a numbered menu; option 1 is the whole path. It writes the pinned
@@ -79,11 +91,33 @@ rather it never touched the card, `-NoPassphrase` leaves it out: the board still
 comes up provisioned and reachable, and prints the one command to finish it over
 SSH.
 
-Requirements on the PC: Windows PowerShell 5.1, Git for Windows (for `openssl`),
-Raspberry Pi Imager, and `age`. `bootstrap_win.ps1 -Action probe` reports which of those
-are present without changing anything, and `-Action cleanup` removes only what
-the script itself installed — recorded when it installs, never guessed at
-afterwards.
+**The only requirement is Windows PowerShell 5.1**, which every Windows 10 and
+11 has. The script installs the rest itself, each pinned to a version and a
+sha256 and verified before it is run:
+
+| | why it is needed |
+|---|---|
+| `age` | decrypts the clone token; kept in the script's own directory, never added to PATH |
+| Git for Windows | `git` to fetch the three directories the script reads when there is no checkout, and `openssl` to hash the account password |
+| Raspberry Pi Imager | writes and verifies the card — and ships the WinUSB driver `rpiboot` needs |
+| `rpiboot` | puts the board into mass-storage mode |
+
+**Whatever you already had, it keeps.** Each install is recorded with whether it
+pre-existed, and `-Action cleanup` removes only what the script itself put
+there — recorded when it installs, never guessed at afterwards.
+`bootstrap_win.ps1 -Action probe` reports what is present without changing
+anything, and `-DryRun` rehearses the whole path without touching the disk.
+
+**Every run leaves a transcript on the PC**, under
+`C:\ProgramData\Scanbox\flash\bootstrap_win-<timestamp>.log` — the path is printed
+at the start and again at the end. It matters because the flash needs
+Administrator: the script relaunches itself under UAC, and that second window is
+its own console. It stays open until you press a key, and whether it succeeded
+or failed the transcript is on disk either way.
+
+Add `-DryRun` to rehearse without touching anything: it prints the exact
+relaunch command line rather than running it, and stops where it would need the
+board.
 
 Its own log for a run is on the device at `/var/log/scanbox-provision.log`, and
 the deploy's log follows at `~/scanbox/deploy.log`.
