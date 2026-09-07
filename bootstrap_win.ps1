@@ -836,15 +836,28 @@ function Get-SparseCheckout {
         # that prints it. git calls the shim with a prompt string and takes one
         # line of its output - "Username" gets the fixed account name that
         # GitHub tokens use, anything else gets the token itself.
+        # THE SHIM IS A /bin/sh SCRIPT, NOT A .cmd, and that is not a style
+        # choice. Git cannot execute a .cmd as GIT_ASKPASS: it fails with
+        # "Access is denied" and the shim never runs at all, which surfaced as
+        # `fatal: unable to get password from user` on a real launch. Measured
+        # both ways on this PC - the .cmd never ran, an identical /bin/sh script
+        # ran and its answer reached GitHub. Git for Windows ships the sh that
+        # runs it, and bootstrap_node.sh has always used this shape.
+        #
+        # LF line endings and a forward-slash path, both required: CRLF breaks
+        # the shebang line, and sh does not read `C:\...`.
         $tokFile = Join-Path $env:TEMP ('sbxtok_' + [guid]::NewGuid().ToString('N') + '.txt')
-        $askFile = Join-Path $env:TEMP ('sbxask_' + [guid]::NewGuid().ToString('N') + '.cmd')
+        $askFile = Join-Path $env:TEMP ('sbxask_' + [guid]::NewGuid().ToString('N') + '.sh')
         [IO.File]::WriteAllText($tokFile, $token, (New-Object Text.UTF8Encoding($false)))
         # Owner-only, so another account on this PC cannot read it while it exists.
         & icacls.exe $tokFile /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
-        $shim = "@echo off`r`n" +
-                "echo %1 | findstr /i `"sername`" >nul && (echo x-access-token& exit /b 0)`r`n" +
-                "type `"$tokFile`"`r`n"
-        [IO.File]::WriteAllText($askFile, $shim, (New-Object Text.ASCIIEncoding))
+        $tokForSh = $tokFile -replace '\\', '/'
+        $shim = "#!/bin/sh`n" +
+                "case `"`$1`" in`n" +
+                "  *sername*) echo `"x-access-token`" ;;`n" +
+                "  *)         cat `"$tokForSh`" ;;`n" +
+                "esac`n"
+        [IO.File]::WriteAllText($askFile, $shim, (New-Object Text.UTF8Encoding($false)))
         $token = $null
         [GC]::Collect()
 
@@ -866,7 +879,12 @@ function Get-SparseCheckout {
         # credential.helper` prints the inherited one and then an empty line),
         # so askpass is the only thing left that can answer. Nothing on the PC
         # is changed: no --global, no --system, no stored credential.
-        $noHelper = @('-c', 'credential.helper=', '-c', 'credential.interactive=false')
+        #
+        # `credential.interactive=false` was here too and is deliberately NOT:
+        # it MASKED the next defect. With it, git's failure to execute the shim
+        # read as `unable to get password from user`; without it, the same run
+        # says `Access is denied`, which is what pointed at the shim itself.
+        $noHelper = @('-c', 'credential.helper=')
         Invoke-Shown $git ($noHelper + @('clone', '--quiet', '--filter=blob:none', '--no-checkout', '--depth', '1', '--branch', $REPO_BRANCH, $url, $CLONE_DIR)) | Out-Null
         Invoke-Shown $git ($noHelper + @('-C', $CLONE_DIR, 'sparse-checkout', 'set', '--cone', 'host/cloudinit', 'host/profiles', 'host/kernel')) | Out-Null
         # This one reaches the network too: the clone was --filter=blob:none, so
