@@ -851,9 +851,28 @@ function Get-SparseCheckout {
         $url = 'https://github.com/Alkaronyan/scanbox.git'
         $env:GIT_ASKPASS = $askFile
         $env:GIT_TERMINAL_PROMPT = '0'
-        Invoke-Shown $git @('clone', '--quiet', '--filter=blob:none', '--no-checkout', '--depth', '1', '--branch', $REPO_BRANCH, $url, $CLONE_DIR) | Out-Null
-        Invoke-Shown $git @('-C', $CLONE_DIR, 'sparse-checkout', 'set', '--cone', 'host/cloudinit', 'host/profiles', 'host/kernel') | Out-Null
-        Invoke-Shown $git @('-C', $CLONE_DIR, 'checkout', '--quiet') | Out-Null
+
+        # GIT_ASKPASS IS NOT ENOUGH ON WINDOWS, and this is what a real run hit:
+        # Git for Windows writes `credential.helper = manager` into its own
+        # system gitconfig, and git asks the HELPER before it ever reaches
+        # askpass. Git Credential Manager then opens its GUI sign-in window and
+        # the run stops dead - on a PUBLIC-looking one-liner, at a private repo
+        # nobody said would need a login. Measured on this PC:
+        #   git config --show-origin --get-all credential.helper
+        #   file:C:/Program Files/Git/etc/gitconfig    manager
+        #
+        # An EMPTY value resets the helper chain for this invocation only
+        # (verified: `git -c credential.helper= config --get-all
+        # credential.helper` prints the inherited one and then an empty line),
+        # so askpass is the only thing left that can answer. Nothing on the PC
+        # is changed: no --global, no --system, no stored credential.
+        $noHelper = @('-c', 'credential.helper=', '-c', 'credential.interactive=false')
+        Invoke-Shown $git ($noHelper + @('clone', '--quiet', '--filter=blob:none', '--no-checkout', '--depth', '1', '--branch', $REPO_BRANCH, $url, $CLONE_DIR)) | Out-Null
+        Invoke-Shown $git ($noHelper + @('-C', $CLONE_DIR, 'sparse-checkout', 'set', '--cone', 'host/cloudinit', 'host/profiles', 'host/kernel')) | Out-Null
+        # This one reaches the network too: the clone was --filter=blob:none, so
+        # the checkout is what actually fetches the file contents. It needs the
+        # same askpass, and the same helper chain cleared.
+        Invoke-Shown $git ($noHelper + @('-C', $CLONE_DIR, 'checkout', '--quiet')) | Out-Null
         # No set-url is needed any more: the remote was never written with a
         # credential in it, so there is nothing in .git/config to undo.
         Write-Ok "sparse checkout at $CLONE_DIR (the token reached git through an askpass shim, never a URL)"
