@@ -745,7 +745,26 @@ function Get-AuthorizedKeys {
 #   console - but this script runs in one. A successful decrypt is the check,
 #   and a wrong passphrase is now caught on the PC in a second instead of
 #   surfacing on a node twenty minutes later.
+# ONE PROMPT PER RUN, AND THIS FUNCTION OWNS IT.
+#
+# Two callers need the same token: Get-SparseCheckout, to clone the three
+# directories this script reads when the PC has no checkout, and Invoke-Flash,
+# for the copy that goes on the card. They are the SAME credential out of the
+# SAME published blob, so decrypting twice asks the operator for the same
+# passphrase twice - which is what a real run did, right after the file header
+# claims it is "asked for ONCE".
+#
+# It is cached here rather than passed around because the alternative is
+# threading it through Resolve-RepoRoot, which has no business holding a
+# credential. The value already lives in this process until the seed is written;
+# caching it changes when it is discarded, not whether.
+$script:DEPLOY_TOKEN = $null
+
 function Get-DeployToken {
+    if ($script:DEPLOY_TOKEN) {
+        Write-Ok 'deploy token already unlocked earlier in this run - not asking again.'
+        return $script:DEPLOY_TOKEN
+    }
     $age = Get-AgePath
     if (-not $age) {
         throw ('age.exe not found, and it is what turns the passphrase into the token that ' +
@@ -766,6 +785,7 @@ function Get-DeployToken {
             throw 'age could not decrypt the clone token (wrong passphrase?). Nothing was written.'
         }
         Write-Ok 'passphrase accepted; the card will carry the clone token, not the passphrase.'
+        $script:DEPLOY_TOKEN = $token
         return $token
     } finally {
         Remove-Item -Force -ErrorAction SilentlyContinue $blob
@@ -808,18 +828,13 @@ function Get-SparseCheckout {
     if (-not $age) { throw 'age.exe not found, and it is needed to decrypt the clone token. Install-Age should have provided it; re-run -Action flash, which installs dependencies first.' }
 
     Write-Step 'No local checkout - fetching the three directories this script reads.'
-    $blob = Join-Path $env:TEMP ('sbxblob_' + [guid]::NewGuid().ToString('N') + '.age')
-    [IO.File]::WriteAllText($blob, (Get-PublishedBlob), (New-Object Text.UTF8Encoding($false)))
+    # The same credential the card gets, from the same blob. Get-DeployToken owns
+    # the prompt and caches it, so a run that needs it here and again for the
+    # card asks once - which is what the header of this file has always claimed.
+    $token = Get-DeployToken
     $tokFile = $null
     $askFile = $null
     try {
-        Write-Host ''
-        Write-Host "age will now ask for the deploy passphrase (hint: $(Get-PublishedHint))." -ForegroundColor Yellow
-        Write-Host 'Type it at ITS prompt. A successful decrypt is also the verification that'
-        Write-Host 'the passphrase is right - the one place in this flow where that is possible.'
-        $token = (& $age -d $blob) -join ''
-        if ($LASTEXITCODE -ne 0 -or -not $token) { throw 'age could not decrypt the token (wrong passphrase?).' }
-
         if (Test-Path $CLONE_DIR) { Remove-Item -Recurse -Force $CLONE_DIR }
         New-Item -ItemType Directory -Force -Path $CLONE_DIR | Out-Null
 
@@ -897,7 +912,8 @@ function Get-SparseCheckout {
         Invoke-Shown $git @('-C', $CLONE_DIR, 'sparse-checkout', 'list') | Out-Null
         return $CLONE_DIR
     } finally {
-        Remove-Item -Force -ErrorAction SilentlyContinue $blob
+        # No $blob here any more: Get-DeployToken owns the encrypted file and
+        # removes its own. Referencing it would throw under Set-StrictMode.
         if ($tokFile) { Remove-Item -Force -ErrorAction SilentlyContinue $tokFile }
         if ($askFile) { Remove-Item -Force -ErrorAction SilentlyContinue $askFile }
         Remove-Item -Force -ErrorAction SilentlyContinue Env:\GIT_ASKPASS
