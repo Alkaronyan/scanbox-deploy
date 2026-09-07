@@ -212,7 +212,36 @@ fi
 # ---- 3. clone/update the private repo WITHOUT the token touching ps/URL ------
 # The token goes into a private tmpfs file; a GIT_ASKPASS shim feeds it to git,
 # so it never appears in a command line, the remote URL, or the environment.
-TOKEN_FILE="$(mktemp /dev/shm/sbxtok.XXXXXX)"; chmod 600 "${TOKEN_FILE}"
+# NOT /dev/shm, and the reason is measured rather than argued. systemd-logind
+# ships RemoveIPC=yes, and it deletes every file in /dev/shm owned by a user the
+# moment that user's LAST login session ends. The deploy user holds no session
+# at all under cloud-init, so one ssh login by somebody watching the
+# provisioning - opened and closed - takes this file with it. Measured on
+# glnode7 2026-09-07: a pi-owned file in /dev/shm was gone 49 s after that
+# logout while the root-owned file beside it survived. That is what emptied the
+# real provisioning run of 17:00:54 UTC before deploy.sh reached step 4 at
+# 17:02:45, which then sealed .env.example as the device's identity - no hwctl,
+# no fleet key, and a passphrase prompt on every later run of that node.
+#
+# /run is a tmpfs too - RAM, cleared at boot, never on the card - and logind
+# does not scan it. The askpass shim below STAYS in /dev/shm because /run is
+# mounted noexec (measured on the same node) and git must execute the shim; it
+# carries no secret, only the path of one, and if it dies the clone fails loudly.
+#
+# Its own directory, NOT /run/scanbox: that one is root-owned 0755, holds the
+# gadget stamp and uvc-ready.json, and is bind-mounted into vid_mux. Taking it
+# over as a private 0700 dir for this user would break every reader of those
+# two files - which is what the first version of this fix did, on the bench,
+# before anything was committed. `/run/scanbox-usb` and `/run/scanbox-weston`
+# are the existing precedent for a purpose-made sibling.
+HANDOFF_DIR=/dev/shm
+if sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /run/scanbox-handoff 2>/dev/null; then
+  HANDOFF_DIR=/run/scanbox-handoff
+else
+  log "WARNING: no promptless sudo, so the clone token stays in /dev/shm - a login"
+  log "         session ending during this run deletes it (systemd RemoveIPC)."
+fi
+TOKEN_FILE="$(mktemp "${HANDOFF_DIR}/sbxtok.XXXXXX")"; chmod 600 "${TOKEN_FILE}"
 printf '%s' "${TOKEN}" > "${TOKEN_FILE}"; unset TOKEN
 ASKPASS="$(mktemp /dev/shm/sbxask.XXXXXX)"; chmod 700 "${ASKPASS}"
 cat > "${ASKPASS}" <<ASK
